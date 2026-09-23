@@ -1,0 +1,26 @@
+RewriteEngine On
+
+# --- 1) Jangan pernah sajikan berkas PHP selain front controller -------------
+# bootstrap.php / config.php / router-local.php hanya boleh di-require dari
+# filesystem, tidak boleh diakses lewat HTTP.
+RewriteRule ^(?!index\.php$)[^/]*\.php$ - [F,L]
+
+# --- 2) Jangan sajikan direktori internal (kode, test, migrasi) --------------
+RewriteRule ^(lib|tests|migrations)(/|$) - [F,L]
+
+# --- 3) Jangan sajikan berkas sensitif (skema & data SQL, konfigurasi) -------
+# schema.sql dan import_surat_*.sql berisi struktur + data surat asli.
+<FilesMatch "\.(sql|sqlite|db|log|md|ini|lock|bak|old|sh|yml|yaml|xml|dist)$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+# --- 4) Kirim semua request yang bukan file/direktori nyata ke front controller
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^ index.php [L,QSA]

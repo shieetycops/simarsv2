@@ -1,0 +1,39 @@
+# Dependensi & hasil build
+node_modules/
+dist/
+coverage/
+
+# Rahasia & konfigurasi berisi kredensial
+.env
+.env.*
+!.env.example
+api-php/config.php
+
+# Vendor PHP (composer install — hanya untuk phpunit)
+api-php/vendor/
+
+# Data runtime & berkas pengguna — jangan pernah commit
+uploads/
+api-php/backups/
+
+# Dump / import data asli (berisi data personal instansi)
+k9030796_simars*.sql
+migration-data.sql
+import_surat_*.sql
+
+# Backup manual & arsip deploy
+*.zip
+*.BASI-*
+bekap/
+
+# Log & file runtime
+*.log
+*.err
+
+# OS / editor / tool lokal
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.claude/
+
