@@ -48,6 +48,22 @@ if ($session && $session['kind'] === 'LEADER') {
     return;
 }
 
+// Fase 2: sesi AKSI TAHAP (VERIFIKASI/DEKISION/ARCHIVE). Pemegang surat di meja
+// Kasubag/Sekretaris/Panitera kini bisa meneruskan surat, memutuskan rute, atau
+// mengarsipkan langsung dari WhatsApp — aksinya memakai LetterTransition yang
+// sama dengan web, jadi tahap Buku Kendali benar-benar berpindah.
+if ($session && in_array($session['kind'], WaStageNotifier::STAGE_KINDS, true)) {
+    if (Wabot::isStageActorRole($actor['role'])) {
+        wabotV2StageReply($sctx, $actor, $actorUserId, (string) $session['kind'], $message,
+            $settings, $inboxId, $replyTarget);
+        return;
+    }
+    // Role diturunkan admin di tengah sesi -> sesi ditutup tanpa balasan.
+    wabotV2StageClose($actorUserId, (string) $session['kind']);
+    echo json_encode(['status' => 'ignored']);
+    return;
+}
+
 // ---------- 4) Sesi kedaluwarsa ----------
 $stale = Db::one("SELECT kind, context FROM wa_sessions
                   WHERE user_id = ? AND kind <> 'CLOSED' AND expires_at <= NOW()", [$actorUserId]);
@@ -71,7 +87,11 @@ if ($stale) {
         // <n> SELESAI" pada teks kedaluwarsa khusus pimpinan/admin).
         wabotReply($stale['kind'] === 'EMPLOYEE'
             ? Wabot::buildNotFoundText(1, 0)
-            : Wabot::buildExpiredText(), $settings, $inboxId, $replyTarget);
+            : (in_array($stale['kind'], WaStageNotifier::STAGE_KINDS, true)
+                // Sesi aksi tahap kedaluwarsa: tugasnya TIDAK hilang, hanya
+                // menunya tak aktif lagi -> arahkan ke aplikasi web.
+                ? Wabot::buildNoStageTaskText((string) $actor['name'])
+                : Wabot::buildExpiredText()), $settings, $inboxId, $replyTarget);
         return;
     }
 }
@@ -202,6 +222,16 @@ function wabotV2ApplyStatus(array $disp, string $status, ?string $notes, array $
             'notes' => $notesFull,
             'actorUserId' => $actor['id'],
         ]);
+    }
+
+    // Fase 1: laporan lewat menu WA juga menggerakkan TAHAP SURAT di Buku Kendali
+    // (PROSES -> DALAM_TINDAK_LANJUT, SELESAI -> SELESAI_DITINDAKLANJUTI), sama
+    // seperti PATCH /dispositions/:id/status di web. Kegagalan perpindahan tahap
+    // tidak boleh menggagalkan laporan pegawai yang sudah tersimpan.
+    try {
+        DispositionBridge::applyStatus((string) $disp['id'], $status, $actor);
+    } catch (Throwable $e) {
+        error_log('[Wabot] gagal memajukan tahap surat: ' . $e->getMessage());
     }
 }
 
@@ -419,14 +449,15 @@ function wabotV2StartSession(array $start, array $actor, string $actorUserId, ar
         }
     }
 
-    // Kandidat = pegawai aktif bernomor WA (sama dgn /users/subordinates untuk
-    // pimpinan), diurutkan nama supaya penomoran menu stabil.
-    $users = Db::all("SELECT id, name, role FROM users
-                        WHERE is_active = 1 AND id <> ?
-                          AND wa_number IS NOT NULL AND wa_number <> ''
-                        ORDER BY name ASC LIMIT " . (int) ($limit + 1), [$actorUserId]);
+    // Kandidat = pegawai aktif bernomor WA. Aturannya: bawahan langsung untuk
+    // role yang wewenangnya terbatas hierarki (Kasubag/Sekretaris/Panitera),
+    // semua pegawai untuk ADMIN/PIMPINAN — lihat waDispositionCandidates().
+    // Diurutkan nama supaya penomoran menu stabil.
+    $users = waDispositionCandidates($actorUserId, (string) $actor['role'], $limit);
     if (!$users) {
-        wabotReply(Wabot::buildNoTargetText(), $settings, $inboxId, $replyTarget);
+        wabotReply(in_array($actor['role'], ['ADMIN', 'PIMPINAN'], true)
+            ? Wabot::buildNoTargetText()
+            : Wabot::buildNoSubordinateTargetText(), $settings, $inboxId, $replyTarget);
         return;
     }
     $overflow = count($users) > $limit;
@@ -476,4 +507,163 @@ function wabotV2FindLetter(int $agendaNo): ?array
 }
 
 
+
+// ---------- Pembantu sesi aksi tahap (Fase 2) ----------
+//
+// Sesi memegang ANTREAN tugas (satu surat = satu tugas). Nomor pada menu selalu
+// berlaku untuk tugas TERDEPAN; tugas berikutnya menunya menyusul otomatis.
+// Balasan yang dikenali: <n> [catatan] | <n> KEBIJAKAN|LANGSUNG [catatan] |
+// MENU | BATAL (BATAL menutup sesi, TIDAK menghapus tugas — surat negara tetap
+// harus ditindaklanjuti, minimal lewat aplikasi web).
+function wabotV2StageReply(array $ctx, array $actor, string $actorUserId, string $kind,
+    string $message, array $settings, string $inboxId, string $replyTarget): void
+{
+    $queue = array_values(array_filter((array) ($ctx['queue'] ?? []), 'is_array'));
+    $reply = Wabot::parseSessionReply($message);
+
+    if ($reply['type'] === 'IGNORE') {
+        echo json_encode(['status' => 'ignored']);
+        return;
+    }
+    if ($reply['type'] === 'CANCEL') {
+        wabotV2StageClose($actorUserId, $kind);
+        wabotReply("Sesi aksi surat ditutup. Tugas penerusan/verifikasi surat tetap menunggu — "
+            . 'buka aplikasi web SIMARS untuk menindaklanjutinya.', $settings, $inboxId, $replyTarget);
+        return;
+    }
+    if (!$queue) {
+        wabotV2StageClose($actorUserId, $kind);
+        wabotReply(Wabot::buildNoStageTaskText((string) $actor['name']), $settings, $inboxId, $replyTarget);
+        return;
+    }
+
+    if ($reply['type'] === 'REMENU') {
+        wabotV2TouchStage($actorUserId, $kind);
+        wabotReply(Wabot::buildStageTaskMenu($queue[0], (string) $actor['name'], Wabot::pendingTaskCount($queue)),
+            $settings, $inboxId, $replyTarget);
+        return;
+    }
+    if ($reply['type'] !== 'CHOICE') {
+        wabotV2TouchStage($actorUserId, $kind);
+        wabotReply(Wabot::buildUnknownReplyText(), $settings, $inboxId, $replyTarget);
+        return;
+    }
+
+    // P1 (revisi kedua, bukti kode): balasan angka selalu mengenai tugas
+    // TERDEPAN antrean ($task = $queue[0]) dan TIDAK terikat agenda tertentu —
+    // saat user memegang >1 surat aktif, angka bisa salah mengenai surat.
+    // Maka penerimaan balasan angka DINONAKTIFKAN (default); hanya kata kunci
+    // + nomor agenda yang diterima. Toggle: workflow_settings.wa_stage_number_reply.
+    if (!Wabot::stageNumberReplyEnabled()) {
+        wabotV2TouchStage($actorUserId, $kind);
+        wabotReply(Wabot::buildStageNumberDisabledText(), $settings, $inboxId, $replyTarget);
+        return;
+    }
+
+    $task = $queue[0];
+    $options = array_values(array_filter((array) ($task['options'] ?? []), 'is_array'));
+    $choice = null;
+    foreach ($options as $o) {
+        if ((int) ($o['n'] ?? 0) === (int) $reply['choice']) $choice = $o;
+    }
+    if ($choice === null) {
+        wabotV2TouchStage($actorUserId, $kind);
+        wabotReply(Wabot::buildInvalidChoiceText((int) $reply['choice'], count($options)),
+            $settings, $inboxId, $replyTarget);
+        return;
+    }
+
+    // Rute keputusan boleh ditulis menyatu dengan nomor: "1 KEBIJAKAN".
+    [$routeHead, $noteRest] = Wabot::parseRouteChoice($reply['notes']);
+    $route = null;
+    $notes = (string) ($noteRest ?? '');
+    if (!empty($choice['requiresRoute'])) {
+        if ($routeHead === null) {
+            wabotV2TouchStage($actorUserId, $kind);
+            wabotReply(Wabot::buildStageTaskFailed('Pilihan ini memerlukan KEPUTUSAN rute: balas *'
+                . (int) $choice['n'] . ' KEBIJAKAN* (perlu arahan pimpinan) atau *' . (int) $choice['n']
+                . ' LANGSUNG* (langsung ke unit pelaksana).'), $settings, $inboxId, $replyTarget);
+            return;
+        }
+        $route = $routeHead;
+    } elseif ($routeHead !== null) {
+        // Kata rute bukan untuk pilihan ini -> perlakukan sebagai catatan biasa.
+        $notes = trim($routeHead . ' ' . $notes);
+    }
+
+    // Surat dibaca ULANG dari DB: menu bisa basi (surat sudah dipindah pengguna
+    // lain, rute berubah). LetterTransition tetap memvalidasi semuanya lagi.
+    $letter = Db::one('SELECT * FROM incoming_letters WHERE id = ?', [(string) ($task['letterId'] ?? '')]);
+    if (!$letter) {
+        wabotV2StageSaveQueue($actorUserId, $kind, array_slice($queue, 1));
+        wabotReply(Wabot::buildStageTaskFailed('Surat pada tugas ini sudah tidak ada.'),
+            $settings, $inboxId, $replyTarget);
+        return;
+    }
+    if (!V2Workflow::userCanAccessLetter($actor, (string) ($letter['securityLevel'] ?? 'BIASA'))) {
+        wabotV2TouchStage($actorUserId, $kind);
+        wabotReply(Wabot::buildStageTaskFailed('Surat ini berlevel RAHASIA; tindak lanjut hanya lewat aplikasi web.'),
+            $settings, $inboxId, $replyTarget);
+        return;
+    }
+
+    $res = LetterTransition::apply($actor, $letter, (string) $choice['toStage'], [
+        'notes'  => $notes,
+        'route'  => $route,
+        'source' => LetterTransition::SOURCE_WA,
+    ]);
+    logActivity($actorUserId, $res['ok'] ? 'WABOT_STAGE_ACTION' : 'WABOT_STAGE_ACTION_FAILED',
+        'INCOMING_LETTER', (string) ($task['letterId'] ?? ''),
+        ($res['ok'] ? 'Aksi menu tahap via WhatsApp' : 'Gagal (' . $res['code'] . '): ' . $res['message'])
+            . ' dari ' . (string) ($task['stage'] ?? '') . ' -> ' . (string) $choice['toStage']);
+
+    if (!$res['ok']) {
+        // Tugas yang sudah tidak relevan (ditangani orang lain / tahap berubah)
+        // dikeluarkan dari antrean supaya menu tidak macet di pilihan mati.
+        if (in_array($res['code'], ['ILLEGAL_TRANSITION', 'ROLE_DENIED', 'SAME_STAGE'], true)) {
+            wabotV2StageSaveQueue($actorUserId, $kind, array_slice($queue, 1));
+            wabotReply(Wabot::buildStageTaskFailed($res['message'] . ' Tugas ini dikeluarkan dari antrean Anda.'),
+                $settings, $inboxId, $replyTarget);
+            return;
+        }
+        wabotV2TouchStage($actorUserId, $kind);
+        wabotReply(Wabot::buildStageTaskFailed($res['message']), $settings, $inboxId, $replyTarget);
+        return;
+    }
+
+    $rest = array_slice($queue, 1);
+    wabotV2StageSaveQueue($actorUserId, $kind, $rest);
+    wabotReply(Wabot::buildStageTaskApplied($task, (string) $res['stage'], $res['route'], $rest !== [], count($rest)),
+        $settings, $inboxId, $replyTarget);
+    if ($rest) {
+        // Menu tugas berikutnya dikirim menyusul (pola sama dengan notifikasi tahap).
+        wabotSend($replyTarget, Wabot::buildStageTaskMenu($rest[0], (string) $actor['name'], Wabot::pendingTaskCount($rest)),
+            $settings, $inboxId);
+    }
+}
+
+
+// Simpan antrean tugas; antrean kosong -> sesi ditutup (tak ada yang bisa dipilih).
+function wabotV2StageSaveQueue(string $userId, string $kind, array $queue): void
+{
+    $queue = array_values($queue);
+    if (!$queue) { wabotV2StageClose($userId, $kind); return; }
+    Db::q("UPDATE wa_sessions SET context = ?, step = 'PICK_ACTION', expires_at = ?, updated_at = NOW()
+            WHERE user_id = ? AND kind = ?",
+        [json_encode(['queue' => $queue], JSON_UNESCAPED_UNICODE), Wabot::newStageExpiry(), $userId, $kind]);
+}
+
+// Tutup sesi aksi tahap (kind=CLOSED dipertahankan utk audit, sama pola sesi lain).
+function wabotV2StageClose(string $userId, string $kind): void
+{
+    Db::q("UPDATE wa_sessions SET kind = 'CLOSED', step = 'DONE', expires_at = NOW(), updated_at = NOW()
+            WHERE user_id = ? AND kind = ?", [$userId, $kind]);
+}
+
+// Perpanjang masa berlaku saat balasan valid (menu masih relevan).
+function wabotV2TouchStage(string $userId, string $kind): void
+{
+    Db::q("UPDATE wa_sessions SET expires_at = ?, updated_at = NOW() WHERE user_id = ? AND kind = ?",
+        [Wabot::newStageExpiry(), $userId, $kind]);
+}
 

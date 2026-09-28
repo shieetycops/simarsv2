@@ -143,7 +143,7 @@ if ($method === 'POST' && $id === '') {
                 $leader['id'],
                 'Surat Masuk Baru',
                 "Surat masuk dari {$data['sender']} perihal \"{$shortSubject}\" memerlukan disposisi.",
-                '/surat-masuk',
+                '/v2/buku-kendali',
             ]);
         }
         if ($security === 'BIASA' || $security === 'TERBATAS') Whatsapp::notifyNewIncomingLetter(Db::$pdo, [
@@ -181,10 +181,77 @@ if ($method === 'POST' && $id === '') {
     return;
 }
 
-// PUT /incoming/:id (ADMIN/SEKRETARIS)
-if ($method === 'PUT' && $id !== '') {
+// PUT /incoming/:id (ADMIN/SEKRETARIS) — koreksi data surat + ganti lampiran.
+//
+// Dibatasi tahap (V2Workflow::CORRECTABLE_STAGES + belum ada disposisi):
+// sesudah ada keputusan disposisi, salinan instruksi sudah beredar ke
+// pimpinan/pelaksana sehingga mengubah record surat membuat riwayat mereka
+// tidak lagi cocok. Role juga dijaga: SEKRETARIS yang tidak berwenang atas
+// surat RAHASIA tidak boleh mengubahnya (403), bukan cuma tidak melihat.
+//
+// CATATAN PENTING (kenapa ada jalur POST + _method=PUT):
+// PHP HANYA memparsing body multipart pada request POST. Untuk PUT, $_POST dan
+// $_FILES selalu kosong dan php://input berisi multipart mentah. Akibatnya
+// unggahan lewat "multipart PUT" (dipakai UI lama saat menekan Edit + ganti
+// lampiran) tidak pernah benar-benar masuk: server hanya melihat body yang
+// tidak terbaca dan tetap menjawab 200 seolah berhasil. Handler ini karena itu
+// menerima dua bentuk:
+//   1. PUT + JSON body       -> koreksi data (tanpa lampiran)
+//   2. POST /incoming/:id    -> multipart dengan field _method=PUT (data+lampiran)
+// Jalur 2 tidak bertabrakan dengan rute lain: POST /incoming hanya berarti
+// registrasi baru saat id kosong.
+$isUpdate = $method === 'PUT'
+    || ($method === 'POST' && $id !== '' && strtoupper((string) ($_POST['_method'] ?? '')) === 'PUT');
+if ($isUpdate && $id !== '') {
     Auth::requireRole($user, ['ADMIN', 'SEKRETARIS']);
     $b = isset($_POST['data']) ? json_decode($_POST['data'], true) : ($_POST ?: json_decode(file_get_contents('php://input'), true)) ?? [];
+    unset($b['_method']);
+    $existing = Db::one("SELECT * FROM incoming_letters WHERE id = ?", [$id]);
+    if (!$existing) {
+        http_response_code(404);
+        echo json_encode(['message' => 'Surat tidak ditemukan.']);
+        return;
+    }
+    if (!V2Workflow::userCanAccessLetter($user, (string) ($existing['securityLevel'] ?? 'BIASA'))) {
+        http_response_code(403);
+        echo json_encode(['message' => 'Anda tidak berwenang mengubah surat dengan level keamanan ini.']);
+        return;
+    }
+    $stageNow = (string) ($existing['currentStage'] ?? '');
+    if (!letterAllowsCorrection($stageNow, $id)) {
+        http_response_code(422);
+        echo json_encode(['message' => correctionBlockedReason($stageNow, $id), 'currentStage' => $stageNow]);
+        return;
+    }
+
+    // Kolom v2 bertipe VARCHAR: tanpa validasi ini, nilai di luar daftar resmi
+    // tersimpan apa adanya (mis. security_level='PENTING').
+    $errors = [];
+    $enumFields = [
+        'securityLevel'  => [V2Workflow::SECURITY_LEVELS, 'Level keamanan tidak valid.'],
+        'urgencyLevel'   => [V2Workflow::URGENCY_LEVELS, 'Tingkat urgensi tidak valid.'],
+        'sourceChannel'  => [V2Workflow::SOURCE_CHANNELS, 'Sumber penerimaan tidak valid.'],
+        'documentType'   => [V2Workflow::DOCUMENT_TYPES, 'Jenis naskah tidak valid.'],
+        'letterCategory' => [V2Workflow::LETTER_CATEGORIES, 'Jenis surat (Dinas/Pribadi) tidak valid.'],
+    ];
+    foreach ($enumFields as $field => [$allowed, $msg]) {
+        if (!array_key_exists($field, $b)) continue;
+        if (!in_array(strtoupper(trim((string) $b[$field])), $allowed, true)) {
+            $errors[$field] = [$msg];
+        }
+    }
+    $newArchiveCode = null;
+    if (array_key_exists('archiveCode', $b)) {
+        [$codeOk, $codeErr] = V2Workflow::validateArchiveCode($b['archiveCode']);
+        if (!$codeOk) { $errors['archiveCode'] = [$codeErr]; }
+        $newArchiveCode = strtoupper(trim((string) $b['archiveCode']));
+    }
+    if ($errors) {
+        http_response_code(400);
+        echo json_encode(['message' => 'Data tidak valid', 'errors' => $errors]);
+        return;
+    }
+
     $map = ['agendaNumber' => 'agenda_number', 'letterNumber' => 'letter_number', 'sender' => 'sender',
         'subject' => 'subject', 'classification' => 'classification', 'nature' => 'nature', 'description' => 'description'];
     $set = [];
@@ -195,19 +262,43 @@ if ($method === 'PUT' && $id !== '') {
     foreach (['letterDate' => 'letter_date', 'receivedDate' => 'received_date'] as $f => $c) {
         if (!empty($b[$f])) { $set[] = "$c = ?"; $vals[] = date('Y-m-d H:i:s', strtotime($b[$f])); }
     }
+    // Kolom v2: hanya berubah kalau dikirim, jadi update sebagian tetap sah.
+    foreach ([
+        'sourceChannel'     => 'source_channel',
+        'letterCategory'    => 'letter_category',
+        'documentType'      => 'document_type',
+        'securityLevel'     => 'security_level',
+        'urgencyLevel'      => 'urgency_level',
+        'canonicalFileName' => 'canonical_file_name',
+    ] as $f => $c) {
+        if (array_key_exists($f, $b)) { $set[] = "$c = ?"; $vals[] = strtoupper(trim((string) $b[$f])); }
+    }
+    if (array_key_exists('archiveCode', $b)) {
+        // Status kode arsip dihitung ulang persis seperti POST: OFFICIAL bila
+        // terdaftar di master SK 627/2023, PENDING_VALIDATION bila formatnya sah
+        // tetapi belum terdaftar, null bila dikosongkan.
+        $archiveStatus = null;
+        if ($newArchiveCode !== '') {
+            $cls = Db::one('SELECT validation_status AS validationStatus FROM archive_classifications WHERE code = ?', [$newArchiveCode]);
+            $archiveStatus = $cls ? $cls['validationStatus'] : 'PENDING_VALIDATION';
+        }
+        $set[] = 'archive_code = ?';        $vals[] = $newArchiveCode ?: null;
+        $set[] = 'archive_code_status = ?'; $vals[] = $archiveStatus;
+    }
     try {
-        // Ganti file lampiran kalau ada file baru terkirim
+        // Ganti file lampiran kalau ada file baru terkirim. Berkas lama dihapus
+        // lewat Upload::delete() supaya aturan folder berkas dan penjagaan pola
+        // path (/uploads/<nama aman>) hanya hidup di satu tempat.
+        $newPath = null;
         if (isset($_FILES['file']) && ($_FILES['file']['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_NO_FILE) {
-            $old     = Db::one("SELECT file_path FROM incoming_letters WHERE id = ?", [$id]);
             $newPath = Upload::save($_FILES['file']);
-            $oldPath = $old['filePath'] ?? null;
-            if ($oldPath && file_exists(dirname(__DIR__, 3) . $oldPath)) {
-                @unlink(dirname(__DIR__, 3) . $oldPath);
-            }
             $set[]  = "file_path = ?";
             $vals[] = $newPath;
         }
         if ($set) { $vals[] = $id; Db::q("UPDATE incoming_letters SET " . implode(', ', $set) . " WHERE id = ?", $vals); }
+        if ($newPath) { Upload::delete($existing['filePath'] ?? null); }
+        logActivity($user['id'], 'UPDATE', 'INCOMING_LETTER', $id,
+            "Memperbarui data surat masuk: {$existing['agendaNumber']}");
         echo json_encode(Db::one("SELECT * FROM incoming_letters WHERE id = ?", [$id]));
     } catch (AuthException $e) {
         throw $e; // error upload (400) ditangani router
@@ -218,11 +309,33 @@ if ($method === 'PUT' && $id !== '') {
     return;
 }
 
-// DELETE /incoming/:id (ADMIN)
+// DELETE /incoming/:id (ADMIN) — hapus surat yang masih boleh dikoreksi.
+//
+// Guard tahap: surat yang sudah didisposisikan tidak boleh dihapus karena
+// instruksi & tanda terima orang lain akan menjadi riwayat yatim.
+// Log aktivitas ditulis SEBELUM penghapusan: baris letter_control_logs dan
+// letter_completeness_checks ikut terhapus oleh ON DELETE CASCADE, jadi
+// activity_logs satu-satunya jejak audit yang tersisa.
 if ($method === 'DELETE' && $id !== '') {
     Auth::requireRole($user, ['ADMIN']);
+    $existing = Db::one("SELECT id, agenda_number AS agendaNumber, letter_number AS letterNumber,
+        current_stage AS currentStage, file_path AS filePath
+        FROM incoming_letters WHERE id = ?", [$id]);
+    if (!$existing) {
+        http_response_code(404);
+        echo json_encode(['message' => 'Surat tidak ditemukan.']);
+        return;
+    }
+    if (!letterAllowsCorrection($existing['currentStage'] ?? null, $id)) {
+        http_response_code(422);
+        echo json_encode(['message' => correctionBlockedReason($existing['currentStage'] ?? null, $id), 'currentStage' => $existing['currentStage']]);
+        return;
+    }
     try {
+        logActivity($user['id'], 'DELETE', 'INCOMING_LETTER', $id,
+            "Menghapus surat masuk: {$existing['agendaNumber']} / {$existing['letterNumber']}");
         Db::q("DELETE FROM incoming_letters WHERE id = ?", [$id]);
+        Upload::delete($existing['filePath'] ?? null);
         echo json_encode(['message' => 'Surat berhasil dihapus.']);
     } catch (Throwable $e) {
         http_response_code(500);

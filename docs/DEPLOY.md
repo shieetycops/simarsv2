@@ -149,25 +149,25 @@ following Content Security Policy directive: "img-src 'self' data: blob:"
 ```
 
 Logo dipakai di tiga tempat: halaman login (`App.tsx`), header sidebar
-(`AppLayout.tsx`), dan kop cetak surat (`LetterView.tsx`) â€” ketiganya memakai
+(`AppLayout.tsx`), dan kop cetak surat (`LetterView.tsx`) — ketiganya memakai
 `settings.logoUrl` yang sama.
 
 > **Jangan tertukar dengan halaman login yang tampak normal.** Kalau
 > `/api/settings` gagal (mis. `pdo_mysql` mati), `src/lib/useSettings.ts` jatuh
 > ke `defaultSettings` yang ber-`logoUrl: null`, lalu `App.tsx` menggambar
-> kotak hijau berisi huruf **"S"**. Itu *placeholder*, bukan logo instansi â€”
+> kotak hijau berisi huruf **"S"**. Itu *placeholder*, bukan logo instansi —
 > artinya logo tidak muncul sama sekali, bukan "berhasil tampil".
 
 Dua cara memperbaiki:
 
-**Cara 1 â€” pindahkan logo ke domain sendiri (disarankan).**
+**Cara 1 — pindahkan logo ke domain sendiri (disarankan).**
 1. Simpan berkas logo ke document root, mis. `.../simars/logo.png`.
 2. Buka aplikasi -> **Pengaturan** -> **URL Logo**, isi `/logo.png`
    (path relatif, jadi tidak ikut berubah bila domain berganti).
 3. `img-src 'self'` sudah mengizinkan, jadi CSP tetap ketat dan logo tidak
    bergantung pada layanan pihak ketiga.
 
-**Cara 2 â€” izinkan host logo di CSP.** Tambahkan host-nya ke `img-src` di
+**Cara 2 — izinkan host logo di CSP.** Tambahkan host-nya ke `img-src` di
 `public/.htaccess` **dan** `dist/.htaccess` (keduanya harus sama, karena
 `dist/` adalah hasil build dari `public/`), lalu upload ulang `.htaccess`:
 
@@ -175,7 +175,7 @@ Dua cara memperbaiki:
 Header always set Content-Security-Policy "... img-src 'self' data: blob: https://i.ibb.co.com; ..."
 ```
 
-Perubahan CSP **tidak** butuh build ulang â€” cukup upload `.htaccess` lalu
+Perubahan CSP **tidak** butuh build ulang — cukup upload `.htaccess` lalu
 hard-refresh (Ctrl+F5), karena browser men-cache header bersama halaman.
 
 > Bila URL logo diganti ke host lain lagi, `img-src` harus ikut diperbarui.

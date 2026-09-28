@@ -247,10 +247,11 @@ class Whatsapp
  {
  $limit = Wabot::MENU_TARGET_LIMIT;
  // Kandidat sama dgn wabotV2StartSession: aktif + bernomor WA, urut nama.
- $users = Db::all("SELECT id, name, role FROM users
- WHERE is_active = 1 AND id <> ?
- AND wa_number IS NOT NULL AND wa_number <> ''
- ORDER BY name ASC LIMIT " . (int) ($limit + 1), [$leaderUserId]);
+ // Sejak Fase 3 memakai waDispositionCandidates() -> bawahan langsung untuk role
+ // berwewenang hierarki, semua pegawai untuk ADMIN/PIMPINAN. Role dibaca dari DB
+ // (penerima DM di sini selalu ber-role PIMPINAN, jadi perilakunya tidak berubah).
+ $leaderRole = (string) (Db::one("SELECT role FROM users WHERE id = ?", [$leaderUserId])['role'] ?? 'PIMPINAN');
+ $users = waDispositionCandidates($leaderUserId, $leaderRole, $limit);
  $overflow = count($users) > $limit;
  if ($overflow) $users = array_slice($users, 0, $limit);
  if (!$users) return ['users' => [], 'overflow' => false];

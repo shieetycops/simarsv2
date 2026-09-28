@@ -68,6 +68,68 @@ function attachDispositions(array $letters): array
     return $letters;
 }
 
+// Apakah surat sudah punya baris disposisi (instruksi) apa pun?
+// Surat seperti ini dianggap sudah "beredar": instruksi dan tanda terimanya
+// menempel pada record surat, jadi data surat tidak boleh diubah/dihapus lagi.
+function letterHasDispositions(string $letterId): bool
+{
+    $row = Db::one('SELECT COUNT(*) AS total FROM dispositions WHERE incoming_letter_id = ?', [$letterId]);
+    return ((int) ($row['total'] ?? 0)) > 0;
+}
+
+// Satu aturan koreksi/hapus untuk PUT & DELETE /api/incoming/:id dan untuk
+// penentuan tombol Edit/Hapus di Buku Kendali (canEdit/canDelete):
+// tahapnya masih di bawah keputusan disposisi (V2Workflow::CORRECTABLE_STAGES)
+// DAN surat belum punya disposisi. Dipakai bersama supaya tombol yang tampil
+// tidak pernah menyimpang dari yang divalidasi server.
+function letterAllowsCorrection(?string $stage, string $letterId): bool
+{
+    return V2Workflow::stageAllowsCorrection($stage) && !letterHasDispositions($letterId);
+}
+
+// Pesan 422 yang menjelaskan ALASAN penolakan koreksi/hapus.
+function correctionBlockedReason(?string $stage, string $letterId): string
+{
+    if (!V2Workflow::stageAllowsCorrection($stage)) {
+        return V2Workflow::correctionBlockedMessage($stage);
+    }
+    return 'Surat ini sudah memiliki disposisi, jadi datanya tidak boleh diubah atau dihapus lagi. '
+        . 'Koreksi setelah disposisi dicatat melalui catatan kendali pada tahap berikutnya.';
+}
+// Kandidat pegawai untuk menu "buat disposisi" WhatsApp (DM pimpinan, sesi
+// mulai manual, dan sesi otomatis dari surat masuk).
+//
+// Temuan B2: dulu daftar ini = SEMUA user aktif bernomor WA, sehingga seorang
+// Kasubag/Sekretaris bisa MEMILIH pegawai mana pun; padahal pemilihannya tetap
+// divalidasi Disposition::canDispose() di langkah berikutnya dan akan DITOLAK
+// bila penerimanya bukan bawahan langsung. Daftar sekarang mengikuti aturan
+// wewenang yang sama:
+//   - ADMIN/PIMPINAN: semua pegawai aktif bernomor WA (perilaku lama
+//     dipertahankan — keduanya memang boleh mendisposisi ke siapa saja, dan
+//     /users/subordinates pun memperlakukan keduanya sama);
+//   - role lain (Kasubag/Sekretaris/Panitera): HANYA bawahan langsung
+//     (users.supervisor_id = dirinya). Bila belum satu pun dipetakan, daftar
+//     kosong — bot menjelaskan bahwa pemetaan "Atasan Langsung" belum diisi,
+//     bukan menawarkan pilihan yang sudah pasti ditolak.
+//
+// Return maksimal $limit + 1 baris; kelebihan itu dipakai pemanggil untuk
+// mendeteksi overflow (pola menu WA yang sudah ada).
+function waDispositionCandidates(string $actorId, string $actorRole, int $limit): array
+{
+    $limit = max(1, $limit);
+    if (!in_array($actorRole, ['ADMIN', 'PIMPINAN'], true)) {
+        return Db::all("SELECT id, name, role FROM users
+                        WHERE is_active = 1 AND supervisor_id = ? AND id <> ?
+                          AND wa_number IS NOT NULL AND wa_number <> ''
+                        ORDER BY name ASC LIMIT " . ($limit + 1), [$actorId, $actorId]);
+    }
+    return Db::all("SELECT id, name, role FROM users
+                    WHERE is_active = 1 AND id <> ?
+                      AND wa_number IS NOT NULL AND wa_number <> ''
+                    ORDER BY name ASC LIMIT " . ($limit + 1), [$actorId]);
+}
+
+
 // Status agregat surat dari kumpulan dispositions-nya — DIHITUNG, bukan
 // kolom tersimpan, supaya tidak pernah "basi"/nggak sinkron. Pengecualian:
 // surat tanpa disposisi (mis. arsip lama yang diinput retroaktif, sudah

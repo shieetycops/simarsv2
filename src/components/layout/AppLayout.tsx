@@ -5,7 +5,6 @@ import { useAuth } from "@/src/lib/AuthContext";
 import { useSettings } from "@/src/lib/useSettings";
 import { 
   LayoutDashboard, 
-  MailOpen, 
   Send, 
   Hash, 
   GitPullRequest, 
@@ -45,11 +44,15 @@ const ALL_ROLES = [
 
 const navItems: NavItem[] = [
   { title: "Dashboard", href: "/", icon: LayoutDashboard, roles: ALL_ROLES },
-  { title: "Surat Masuk", href: "/surat-masuk", icon: MailOpen, roles: ALL_ROLES },
-  { title: "Surat Masuk · v2", href: "/v2/surat-masuk", icon: ClipboardList, roles: ALL_ROLES },
-  { title: "Buku Kendali · v2", href: "/v2/buku-kendali", icon: BookOpenText, roles: ALL_ROLES },
+  // Satu pintu masuk surat: /surat-masuk (menu lama) sudah diarahkan ke halaman
+  // ini supaya tidak ada lagi dua daftar surat yang isinya bisa berbeda.
+  { title: "Surat Masuk", href: "/v2/surat-masuk", icon: ClipboardList, roles: ALL_ROLES },
+  { title: "Buku Kendali", href: "/v2/buku-kendali", icon: BookOpenText, roles: ALL_ROLES },
   { title: "Surat Keluar", href: "/surat-keluar", icon: Send, roles: ALL_ROLES },
   { title: "Ambil Nomor", href: "/ambil-nomor", icon: Hash, roles: ALL_ROLES },
+  // Disposisi: masih dipakai pimpinan untuk menulis ISI instruksi (tabel
+  // dispositions dipakai bersama v2). Catatan penting: menu ini tidak
+  // memindahkan current_stage - perpindahan tahap dilakukan di Buku Kendali.
   { title: "Disposisi", href: "/disposisi", icon: GitPullRequest, roles: ALL_ROLES },
   { title: "Arsip Digital", href: "/arsip", icon: Archive, roles: ALL_ROLES },
   { title: "Laporan", href: "/laporan", icon: FileBarChart, roles: ["ADMIN", "PIMPINAN", "PANITERA", "SEKRETARIS", "PANITERA_MUDA_PERMOHONAN", "PANITERA_MUDA_GUGATAN", "PANITERA_MUDA_HUKUM", "KEPALA_SUB_PTIP", "KEPALA_SUB_KEPEGAWAIAN", "KEPALA_SUB_UMUM"] },

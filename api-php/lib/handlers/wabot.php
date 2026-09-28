@@ -105,10 +105,18 @@ try {
     $replyTarget = Wabot::digitsOf($ident['actor']) . '@s.whatsapp.net';
     if ($replyTarget === '@s.whatsapp.net') $replyTarget = $sender;
 
-    // 5) Dua parser bersaing: v1 ("DISPOSISI", "DISPOSISI 2 SELESAI") dan v2
-    // (mulai sesi "DISPOSISI 12"). Teks seperti "DISPOSISI 12" bersayap: v1
-    // membacanya INVALID, v2 sebagai mulai sesi. Bagi PIMPINAN/ADMIN mulai
-    // sesi menang; role lain tetap mendapat balasan v1.
+    // 5) Prioritas parser (Fix 2 — kata kunci + agenda, tanpa angka dipakai ulang):
+    // (a) perintah kata kunci SOP/AS/04: TERIMA/TOLAK/KEBIJAKAN/LANGSUNG/ARAHAN/
+    //     TERUSKAN/TUNJUK/PROSES/SELESAI/ARSIP <agenda> [isian] — semua role yang
+    //     nomornya terdaftar; otorisasi per kata kunci diperiksa di handler.
+    // (b) v1 ("DISPOSISI", "DISPOSISI 2 SELESAI") dan v2 mulai sesi ("DISPOSISI 12").
+    // Teks seperti "DISPOSISI 12" bersayap: v1 membacanya INVALID, v2 sebagai
+    // mulai sesi. Bagi PIMPINAN/ADMIN mulai sesi menang; role lain tetap v1.
+    $keyword = Wabot::parseKeywordCommand($message);
+    if ($keyword !== null) {
+        require __DIR__ . '/wabot_keyword.php';
+        return;
+    }
     $cmd = Wabot::parseCommand($message);
     $start = Wabot::parseGroupStart($message);
     if ($start !== null && Wabot::isAuthorizedRole($actor['role'])) {

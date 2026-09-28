@@ -67,6 +67,24 @@ class Upload
         return "/uploads/$name";
     }
 
+    // Hapus berkas lampiran (bukan upload baru). Dipakai saat surat dihapus atau
+    // lampirannya diganti, supaya folder uploads/ tidak menumpuk berkas yatim.
+    //
+    // KEAMANAN: hanya menerima pola "/uploads/<nama berkas>" buatan save().
+    // Tanpa penjagaan ini, nilai kolom file_path yang bisa saja diisi klien
+    // ("/uploads/../../config.php") akan membuat unlink() menghapus berkas di
+    // luar folder uploads/.
+    public static function delete(?string $publicPath): void
+    {
+        if (!$publicPath || !preg_match('#^/uploads/[A-Za-z0-9._-]+$#', $publicPath)) {
+            return;
+        }
+        $file = dirname(__DIR__, 2) . $publicPath;
+        if (is_file($file)) {
+            @unlink($file);
+        }
+    }
+
     // Ekstensi kanonik yang boleh dipakai menyimpan file ini, atau null bila
     // tipe ISI file tidak cocok dengan ekstensi NAMA kiriman. Dipisah dari
     // save() supaya logika penentu ekstensi bisa diuji tanpa HTTP upload.

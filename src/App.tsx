@@ -14,7 +14,6 @@ import ErrorBoundary from "./components/ErrorBoundary";
 // halaman + recharts masuk ke satu bundle, sehingga halaman login pun harus
 // mengunduh seluruh aplikasi sebelum bisa tampil.
 const DashboardOverview = lazy(() => import("./components/dashboard/DashboardOverview"));
-const IncomingLetters = lazy(() => import("./components/letters/IncomingLetters"));
 const IncomingLettersV2 = lazy(() => import("./components/letters/IncomingLettersV2"));
 const ControlBook = lazy(() => import("./components/control/ControlBook"));
 const OutgoingLetters = lazy(() => import("./components/letters/OutgoingLetters"));
@@ -216,7 +215,7 @@ const Dashboard = () => {
             <FileBarChart className="w-4 h-4 mr-1.5" />
             Laporan
           </Button>
-          <Button size="sm" onClick={() => navigate("/surat-masuk")}>
+          <Button size="sm" onClick={() => navigate("/v2/surat-masuk")}>
             <MailOpen className="w-4 h-4 mr-1.5" />
             Input Surat
           </Button>
@@ -250,7 +249,9 @@ export default function App() {
           <Route path="/login" element={<LoginPage />} />
           <Route path="/surats/:id" element={<LetterView />} />
           <Route path="/" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
-          <Route path="/surat-masuk" element={<ProtectedRoute><IncomingLetters /></ProtectedRoute>} />
+          {/* Satu pintu masuk surat: /surat-masuk dialihkan ke Buku Kendali v2
+              agar tautan/notifikasi lama tidak berakhir 404. */}
+          <Route path="/surat-masuk" element={<Navigate to="/v2/buku-kendali" replace />} />
           <Route path="/v2/surat-masuk" element={<ProtectedRoute><IncomingLettersV2 /></ProtectedRoute>} />
           <Route path="/v2/buku-kendali" element={<ProtectedRoute><ControlBook /></ProtectedRoute>} />
           <Route path="/surat-keluar" element={<ProtectedRoute><OutgoingLetters /></ProtectedRoute>} />

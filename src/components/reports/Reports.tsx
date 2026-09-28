@@ -262,7 +262,7 @@ export default function Reports() {
     setEndDate(`${now.getFullYear()}-12-31`);
   };
 
-  const handleExportExcel = () => {
+  const handleExportCsv = () => {
  if (sortedData.length === 0) return;
 
     if (activeTab === "incoming") {
@@ -309,7 +309,7 @@ export default function Reports() {
     }
   };
 
- // Urutan utk tabel + pagination + cetak PDF + Excel. "bawaan" = urutan server apa adanya;
+ // Urutan utk tabel + pagination + cetak PDF + CSV. "bawaan" = urutan server apa adanya;
  // sort sifat/klasifikasi ikut urutan enum letterOptions, tie-break tanggal terbaru.
  const sortedData = useMemo(() => {
  const arr = [...data];
@@ -465,12 +465,12 @@ export default function Reports() {
                 Filter
               </Button>
               <Button
-                onClick={handleExportExcel}
+                onClick={handleExportCsv}
                 variant="outline"
                 className="h-9 px-4 text-sm font-medium rounded-md border-slate-200"
               >
                 <FileSpreadsheet className="w-4 h-4 mr-2 text-green-600" />
-                Excel
+                CSV
               </Button>
               <Button
                 onClick={() => printAsPDF(

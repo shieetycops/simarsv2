@@ -133,7 +133,7 @@ if ($method === 'PATCH' && $id !== '' && $sub === 'activate') {
 if ($method === 'GET' && $id === '') {
     Auth::requireRole($user, ['ADMIN']);
     echo json_encode(Db::all(
-        "SELECT id, username, name, role, is_active, wa_number, created_at FROM users ORDER BY created_at DESC"
+        "SELECT id, username, name, role, is_active, wa_number, supervisor_id, created_at FROM users ORDER BY created_at DESC"
     ));
     return;
 }
@@ -165,16 +165,24 @@ if ($method === 'POST' && $id === '') {
         echo json_encode(['message' => $pwErr]);
         return;
     }
+    // Atasan langsung (Fase 0): dasar wewenang disposisi hierarkis.
+    [$supOk, $supErr, $supId] = resolveSupervisorId($b['supervisorId'] ?? null, '');
+    if (!$supOk) {
+        http_response_code(400);
+        echo json_encode(['message' => $supErr, 'field' => 'supervisorId']);
+        return;
+    }
     try {
         $newId = Db::generateId();
-        Db::q("INSERT INTO users (id, username, password, name, role, is_active, wa_number)
-               VALUES (?, ?, ?, ?, ?, 1, ?)", [
+        Db::q("INSERT INTO users (id, username, password, name, role, is_active, wa_number, supervisor_id)
+               VALUES (?, ?, ?, ?, ?, 1, ?, ?)", [
             $newId,
             $b['username'] ?? '',
             password_hash($b['password'] ?? '', PASSWORD_BCRYPT),
             $b['name'] ?? '',
             $b['role'] ?? 'STAFF',
             !empty($b['waNumber']) ? Whatsapp::normalizePhone($b['waNumber']) : null,
+            $supId,
         ]);
         http_response_code(201);
         echo json_encode(['id' => $newId, 'username' => $b['username'] ?? '', 'name' => $b['name'] ?? '', 'role' => $b['role'] ?? 'STAFF']);
@@ -228,6 +236,17 @@ if ($method === 'PUT' && $id !== '' && $sub === '') {
         $set[] = "wa_number = ?";
         $vals[] = !empty($b['waNumber']) ? Whatsapp::normalizePhone($b['waNumber']) : null;
     }
+    // Atasan langsung (Fase 0): boleh dikosongkan (null) untuk melepas hierarki.
+    if (array_key_exists('supervisorId', $b)) {
+        [$supOk, $supErr, $supId] = resolveSupervisorId($b['supervisorId'], $id);
+        if (!$supOk) {
+            http_response_code(400);
+            echo json_encode(['message' => $supErr, 'field' => 'supervisorId']);
+            return;
+        }
+        $set[] = "supervisor_id = ?";
+        $vals[] = $supId;
+    }
     if (!empty($b['password'])) {
         $set[] = "password = ?";
         $vals[] = password_hash($b['password'], PASSWORD_BCRYPT);
@@ -238,7 +257,7 @@ if ($method === 'PUT' && $id !== '' && $sub === '') {
             Db::q("UPDATE users SET " . implode(', ', $set) . " WHERE id = ?", $vals);
         }
         // ponytail: tak kembalikan hash password (versi Express bocorkan; ini lebih aman).
-        echo json_encode(Db::one("SELECT id, username, name, role, avatar, is_active, wa_number, created_at, updated_at FROM users WHERE id = ?", [$id]));
+        echo json_encode(Db::one("SELECT id, username, name, role, avatar, is_active, wa_number, supervisor_id, created_at, updated_at FROM users WHERE id = ?", [$id]));
     } catch (Throwable $e) {
         http_response_code(500);
         echo json_encode(['message' => 'Gagal memperbarui user.']);
@@ -269,4 +288,23 @@ function validateWa($wa): ?string
     return strlen(preg_replace('/[^0-9]/', '', (string) $wa)) >= 9
         ? null
         : "Nomor WhatsApp minimal 9 digit angka";
+}
+
+// Atasan langsung (users.supervisor_id) — dasar wewenang disposisi hierarkis
+// (Disposition::canDispose) dan sasaran menu WhatsApp pegawai.
+//
+// Fase 0: kolomnya sudah ada di skema sejak awal, tetapi TIDAK pernah bisa diisi
+// lewat aplikasi (tidak ada di whitelist POST/PUT), sehingga Kasubag Umum &
+// Sekretaris selalu ditolak server saat mendisposisi ke bawahannya.
+//
+// Return [ok, errorMessage, ?string nilaiSiapSimpan]. Kosong = lepas hierarki.
+function resolveSupervisorId($value, string $selfId): array
+{
+    if ($value === null || trim((string) $value) === '') return [true, null, null];
+    $supId = trim((string) $value);
+    if ($supId === $selfId) return [false, 'Atasan langsung tidak boleh diri sendiri.', null];
+    $sup = Db::one("SELECT id, is_active FROM users WHERE id = ?", [$supId]);
+    if (!$sup) return [false, 'Atasan langsung tidak ditemukan.', null];
+    if (!(int) $sup['isActive']) return [false, 'Atasan langsung harus pengguna yang masih aktif.', null];
+    return [true, null, $supId];
 }

@@ -5,9 +5,22 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../lib/Db.php';
 require_once __DIR__ . '/../lib/helpers.php';
 require_once __DIR__ . '/../lib/Whatsapp.php';
+require_once __DIR__ . '/WaStub.php';
 
 final class IncomingLetterNotificationTest extends TestCase
 {
+    use WaStub;
+
+    /**
+     * Stub Fonnte dipasang ulang sebelum setiap uji. Dua uji di kelas ini
+     * (notifikasi ke pimpinan) TIDAK memasang stub sendiri, jadi tanpa ini
+     * keduanya menembak https://api.fonnte.com/send sungguhan.
+     */
+    protected function setUp(): void
+    {
+        $this->stubWhatsapp();
+    }
+
     private function setupDb(): PDO
     {
         $db = new PDO('sqlite::memory:');
@@ -71,7 +84,7 @@ final class IncomingLetterNotificationTest extends TestCase
             $captured = compact('token', 'target', 'message');
         };
         $this->notifyLeaders(['agendaNumber'=>'AGD/2026/003','letterNumber'=>'12/T/2026','sender'=>'Kemenag','subject'=>'Edaran','receivedDate'=>'2026-07-26']);
-        Whatsapp::$sender = null;
+        $this->stubWhatsapp();
         $this->assertNotNull($captured);
         $this->assertSame('TOKEN', $captured['token']);
         $this->assertSame('GRP', $captured['target']);
@@ -92,7 +105,7 @@ final class IncomingLetterNotificationTest extends TestCase
         $called = false;
         Whatsapp::$sender = function () use (&$called) { $called = true; };
         $this->notifyLeaders(['agendaNumber'=>'AGD/2026/004','letterNumber'=>'13/T/2026','sender'=>'BKN','subject'=>'Kepegawaian','receivedDate'=>'2026-07-26']);
-        Whatsapp::$sender = null;
+        $this->stubWhatsapp();
         $this->assertFalse($called);
         $logs = Db::all("SELECT * FROM activity_logs WHERE action = 'WHATSAPP_SENT' AND user_id = 'admin1'");
         $this->assertCount(0, $logs);

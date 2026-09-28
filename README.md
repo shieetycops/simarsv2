@@ -2,7 +2,10 @@
 
 Aplikasi registrasi dan manajemen arsip **surat masuk & surat keluar** untuk lingkungan Pengadilan Agama, disusun mengikuti:
 
-- **KMA 131/2023** — Tata Naskah Dinas dan Arsip di Lingkungan Mahkamah Agung
+- **SOP/AS/04 PA Pasarwajo** — Penanganan Surat Masuk langkah 1-18 (rujukan tahap
+  1-18; bagian yang diimplementasi: langkah 11-18; langkah 1-11 verifikasi
+  alamat/sortir/klasifikasi/scan tercakup sebagian — lihat CATATAN_ASUMSI_REVISI)
+- **KMA 131/2023** — hanya BAB IV (pengendalian/audit) & BAB V (pengamanan naskah)
 - **SK Sekretaris MA 627/2023** — Kode Klasifikasi Arsip
 
 Versi ini (**v2**) adalah generasi baru aplikasi: registrasi surat dengan **state machine 17 tahap**, layar **Buku Kendali Naskah Dinas**, **4 level keamanan naskah**, **master kode klasifikasi arsip**, serta integrasi **WhatsApp** untuk notifikasi dan bot disposisi.
@@ -17,7 +20,9 @@ Versi ini (**v2**) adalah generasi baru aplikasi: registrasi surat dengan **stat
 - **4 level keamanan resmi KMA 131/2023**: `BIASA`, `TERBATAS`, `RAHASIA`, `SANGAT_RAHASIA` (sifat *penting/segera* dicatat terpisah di kolom urgensi, bukan level keamanan).
 - **Master klasifikasi arsip** (Lampiran I SK 627/2023): kode resmi berstatus `OFFICIAL`, kode pemakaian di luar master ditandai `PENDING_VALIDATION` untuk validasi arsiparis; kode primer non-resmi ditolak API.
 - **Keamanan naskah rahasia**: daftar surat & Buku Kendali difilter per role, WhatsApp otomatis dilewati, tautan publik view-only ditolak `403`.
-- **Integrasi WhatsApp** — notifikasi grup surat masuk, DM langsung ke pimpinan (dengan lampiran view-only bertanda tangan HMAC), serta bot disposisi berbasis sesi chat.
+- **Integrasi WhatsApp** — notifikasi grup surat masuk, DM langsung ke pimpinan (dengan lampiran view-only bertanda tangan HMAC), bot disposisi berbasis sesi chat, plus **notifikasi per tahap + menu aksi bernomor** untuk Kasubag/Sekretaris/Panitera (meneruskan, memutuskan rute, mengarsipkan langsung dari chat).
+- **Tindak lanjut pelaksana menggerakkan tahap** — laporan `PROSES`/`SELESAI` (dari web maupun WhatsApp) menaikkan tahap surat ke `DALAM_TINDAK_LANJUT`/`SELESAI_DITINDAKLANJUTI` secara otomatis dan tercatat di Buku Kendali (`AUTO_STAGE`); laporan dari surat yang belum sampai rantai pelaksana **tidak** melompati tahap dan alasannya dijelaskan.
+- **Penarikan kembali (rollback) oleh Kasubag Umum** — menarik surat kembali ke mejanya dengan alasan wajib, untuk memperbaiki disposisi yang salah (`POST /api/control/:id/reopen`, tercatat `STAGE_REOPEN`).
 - **Menu pendukung** — surat keluar, ambil nomor surat, disposisi, manajemen pengguna, laporan cetak, arsip digital, audit log, pengaturan instansi.
 
 ## Teknologi
@@ -33,7 +38,7 @@ Versi ini (**v2**) adalah generasi baru aplikasi: registrasi surat dengan **stat
 ## Arsitektur Singkat
 
 ```
-Browser — React SPA (Vite dev server mem-proxy /api → 127.0.0.1:8011)
+Browser — React SPA (Vite dev server mem-proxy /api dan /uploads → 127.0.0.1:8011)
    │ JSON + Bearer token
    ▼
 api-php/  (PHP native; .htaccess → index.php → lib/handlers/*.php)
@@ -52,10 +57,11 @@ Fonnte / WhatsApp Cloud          notifikasi grup & DM pimpinan
 
 | Kelompok aktor | Role di aplikasi | Tugas dalam alur |
 |---|---|---|
-| Persuratan | `ADMIN`, `SEKRETARIS`, `PANITERA`, `KEPALA_SUB_UMUM` | Registrasi, verifikasi alamat, sortir, registrasi ulang, kirim ke pengarsipan |
-| Pimpinan | `PIMPINAN`, `WAKIL_KETUA` | Membaca/mengarahkan surat, disposisi, kebijakan pimpinan |
-| Panitera | `ADMIN`, `SEKRETARIS`, `PANITERA` | Registrasi→disposisi, memilih jalur terusan, pengarsipan akhir |
-| Pelaksana | `STAFF`, `KEPALA_SUB_*`, `PANITERA_MUDA_*`, dll. | Tindak lanjut surat sampai selesai |
+| Persuratan | `ADMIN`, `SEKRETARIS`, `PANITERA`, `KEPALA_SUB_UMUM` | Registrasi, verifikasi alamat, sortir, registrasi ulang, **pengarahan surat** (SOP langkah 4-7), kirim ke pengarsipan |
+| Panitera | `ADMIN`, `SEKRETARIS`, `PANITERA` | **Titik keputusan**: menentukan rute `KEBIJAKAN`/`LANGSUNG`, meneruskan ke pelaksana, pengarsipan akhir. Semuanya juga bisa dijalankan dari menu WhatsApp bernomor |
+| Pimpinan | `PIMPINAN`, `WAKIL_KETUA` | Memberi kebijakan/arahan **hanya** untuk surat yang diteruskan Sekretaris/Panitera (rute `KEBIJAKAN`); pada alur v2 tidak ada tombol transisi khusus pimpinan — isi arahan dicatat di riwayat Buku Kendali saat Sekretaris/Panitera meneruskan surat |
+| Pelaksana | `STAFF`, `KEPALA_SUB_*`, `PANITERA_MUDA_*`, dll. | Tindak lanjut surat sampai selesai; status `PROSES`/`SELESAI` (web atau balasan WhatsApp `1`/`2`) otomatis menaikkan tahap surat |
+| Atasan langsung | kolom `users.supervisor_id` (menu **Pengguna → Atasan Langsung**) | Menentukan siapa yang boleh mendisposisi siapa dan siapa yang muncul di menu WhatsApp Kasubag/Sekretaris/Panitera |
 
 ### 1. Registrasi — `/v2/surat-masuk`
 
@@ -71,7 +77,8 @@ Efek otomatis saat registrasi (hanya untuk level BIASA/TERBATAS):
 
 Layar kerja utama alur v2. Untuk tiap naskah:
 
-- **Verifikasi alamat tujuan** — catat SESAI / TIDAK SESAI (naskah salah alamat berhenti di tahap `SALAH_ALAMAT`).
+- **Tombol "Buka"** — membuka kartu Detail kendali (di bawah daftar) beserta lampiran scan. Karena kartunya ada di bawah tabel, klik "Buka" menampilkan indikator "Membuka detail surat…", menggulirkan layar ke kartu, dan menandai baris yang sedang dibuka; kegagalan permintaan muncul sebagai banner di atas tabel.
+- **Verifikasi alamat tujuan** — catat SESUAI / TIDAK SESUAI (naskah salah alamat berhenti di tahap `SALAH_ALAMAT`).
 - **Checklist kelengkapan** (6 butir): alamat, nomor, tanggal, perihal, lampiran, tanda tangan/stempel → status LENGKAP / TIDAK LENGKAP, tersimpan sebagai riwayat pemeriksaan.
 - **Transisi tahap** — hanya tombol tahap yang sah untuk role Anda yang ditampilkan; server memvalidasi ulang.
 - **Timeline** — riwayat Buku Kendali (aksi, aktor, catatan) dan riwayat pemeriksaan kelengkapan.
@@ -84,30 +91,47 @@ Layar kerja utama alur v2. Untuk tiap naskah:
 | 2 | VERIFIKASI ALAMAT | → Disortir / Salah alamat | Persuratan |
 | 3 | SALAH ALAMAT | (titik berhenti) | — |
 | 4 | DISORTIR | → Menunggu pengarahan / Terregistrasi | Persuratan |
-| 5 | MENUNGGU PENGARAHAN | → Dibaca pengarah | Pimpinan |
+| 5 | MENUNGGU PENGARAHAN | → Dibaca pengarah | Persuratan (pengarah surat) |
 | 6 | DIBACA PENGARAH | → Terregistrasi / Menunggu disposisi | Persuratan |
 | 7 | TERREGISTRASI | → Menunggu disposisi / Didisposisikan | Panitera |
-| 8 | MENUNGGU DISPOSISI | → Didisposisikan | Pimpinan |
-| 9 | DIDISPOSISIKAN | → Ke Kasubag / Ke Sekretaris-Panitera / Menunggu kebijakan / Ke pelaksana | Panitera |
+| 8 | MENUNGGU DISPOSISI | → Didisposisikan (**wajib pilih rute**) | Panitera |
+| 9 | DIDISPOSISIKAN | → Ke Kasubag / Ke Sekretaris-Panitera / Menunggu kebijakan / Ke pelaksana (**dikunci rute keputusan**) | Panitera |
 | 10 | DITERUSKAN KE KASUBAG UMUM | → Ke Sekretaris-Panitera / Menunggu kebijakan | Persuratan |
-| 11 | DITERUSKAN KE SEKRETARIS-PANITERA | → Menunggu kebijakan / Ke pelaksana | Pelaksana |
-| 12 | MENUNGGU KEBIJAKAN PIMPINAN | → Ke pelaksana | Pimpinan |
+| 11 | DITERUSKAN KE SEKRETARIS-PANITERA | → Menunggu kebijakan / Ke pelaksana | Persuratan |
+| 12 | MENUNGGU KEBIJAKAN PIMPINAN | → Ke pelaksana | Persuratan |
 | 13 | DITERUSKAN KE PELAKSANA | → Dalam tindak lanjut | Pelaksana |
 | 14 | DALAM TINDAK LANJUT | → Selesai ditindaklanjuti | Pelaksana |
 | 15 | SELESAI DITINDAKLANJUTI | → Menunggu pengarsipan | Persuratan |
 | 16 | MENUNGGU PENGARSIPAN | → Diarsipkan | Panitera |
 | 17 | DIARSIPKAN | (arsip final) | — |
 
+Catatan perilaku (sesi 24 Sep 2026):
+
+- Tahap **13 → 14 → 15** kini bergerak dari **laporan pelaksana**, bukan hanya
+  bila petugas membuka Buku Kendali: `PROSES` → `DALAM_TINDAK_LANJUT`, `SELESAI` →
+  `SELESAI_DITINDAKLANJUTI` (satu atau dua langkah sekaligus), dicatat sebagai
+  `AUTO_STAGE` di riwayat kendali. Tahap 16 → 17 (`MENUNGGU_PENGARSIPAN` →
+  `DIARSIPKAN`) **tetap manual**.
+- Setiap perpindahan tahap mengirim **notifikasi WhatsApp ke pemegang tahap baru**
+  (Kasubag/Sekretaris/Panitera/Pimpinan) beserta **menu aksi bernomor**, kecuali
+  surat `RAHASIA`/`SANGAT_RAHASIA` yang isinya tidak pernah masuk WhatsApp.
+- Kasubag Umum dapat **menarik surat kembali** ke mejanya (`Tarik kembali` di Buku
+  Kendali, alasan wajib) bila disposisi ke pelaksana keliru; ADMIN juga dapat
+  menarik surat dari meja pimpinan/pengarsipan.
+- Kolom **Pelaksana** di Buku Kendali menunjukkan siapa yang ditunjuk menerima
+  disposisi surat (`incoming_letters.assignee_user_id`, migrasi `2026_09_26`).
+
 ```
 DITERIMA → VERIFIKASI ALAMAT → DISORTIR ─┬→ MENUNGGU PENGARAHAN → DIBACA PENGARAH ─┐
-    │              │                     │      (pimpinan)                         │
+    │              │                     │   (pengarah surat)                      │
     │              └→ SALAH ALAMAT       └→ TERREGISTRASI ←─────────────────────────┘
     │                                                    │
-    │                                        MENUNGGU DISPOSISI → DIDISPOSISIKAN
+    │                            MENUNGGU DISPOSISI → DIDISPOSISIKAN
+    │                            rute KEBIJAKAN / LANGSUNG dipilih di titik ini
     │        ┌───────────────────────┬───────────────────────┼──────────────┐
     │        ▼                       ▼                       ▼              ▼
     │  KE KASUBAG UMUM → KE SEKRIS/PANITERA → MENUNGGU KEBIJAKAN → KE PELAKSANA
-    │   (persuratan)        (pelaksana)        PIMPINAN (pimpinan)     │
+    │   (persuratan)        (persuratan)     (pimpinan) → (persuratan)   │
     │                                                                ▼
     └─ DISORTIR dapat langsung TERREGISTRASI     DALAM TINDAK LANJUT → SELESAI DITINDAKLANJUTI
                                                                     │ (persuratan)
@@ -125,15 +149,23 @@ DITERIMA → VERIFIKASI ALAMAT → DISORTIR ─┬→ MENUNGGU PENGARAHAN → DI
 Surat masuk dari **DPRD Kabupaten Buton** perihal *"Undangan Rapat Paripurna DPRD Kabupaten Buton"* yang bersifat **penting**:
 
 1. `SEKRETARIS` registrasikan di `/v2/surat-masuk` — jenis naskah **UNDANGAN**, level keamanan **BIASA** ("penting" dicatat di catatan/urgensi, bukan level keamanan), kode arsip **HM** (Humas dan Protokol). Notifikasi + WA otomatis ke pimpinan.
-2. Di Buku Kendali: verifikasi alamat **SESAI** → checklist kelengkapan **LENGKAP** → transisi DITERIMA → VERIFIKASI ALAMAT → DISORTIR → MENUNGGU PENGARAHAN.
-3. `PIMPINAN` membaca (sudah dapat DM WA + lampiran) → DIBACA PENGARAH.
-4. Persuratan: TERREGISTRASI → MENUNGGU DISPOSISI; `PIMPINAN` disposisi → DIDISPOSISIKAN.
+2. Di Buku Kendali: verifikasi alamat **SESUAI** → checklist kelengkapan **LENGKAP** → transisi DITERIMA → VERIFIKASI ALAMAT → DISORTIR → MENUNGGU PENGARAHAN.
+3. Persuratan (pengarah surat) membaca → DIBACA PENGARAH.
+4. Persuratan: TERREGISTRASI → MENUNGGU DISPOSISI; `SEKRETARIS`/`PANITERA` memutuskan rute **LANGSUNG** → DIDISPOSISIKAN.
 5. Panitera teruskan → KE PELAKSANA; `STAFF` tindak lanjut → DALAM TINDAK LANJUT → SELESAI DITINDAKLANJUTI.
 6. Persuratan kirim ke pengarsipan → `PANITERA` arsipkan → **DIARSIPKAN**.
 
-### 6. Menu lain (tetap tersedia)
+### 6. Menu lain
 
-`/surat-masuk` (registrasi versi lama), `/surat-keluar`, `/ambil-nomor`, `/disposisi`, `/users`, `/laporan`, `/arsip`, `/audit`, `/pengaturan`, `/bot-whatsapp`. Mode v2 berjalan paralel di menu `/v2/...` tanpa mengubah data alur lama.
+Registrasi & pengelolaan surat masuk kini **satu pintu**:
+
+- `/v2/surat-masuk` — registrasi naskah, termasuk **unggah scan surat**.
+- `/v2/buku-kendali` — daftar + detail naskah, transisi tahap, **koreksi (Edit)**, **hapus (khusus ADMIN)**, ganti lampiran, filter (pencarian/tahap/keamanan/jenis/tanggal terima), paginasi 10 baris, dan **Ekspor CSV**.
+- `/surat-masuk` — dialihkan otomatis ke `/v2/buku-kendali`, supaya tautan dan notifikasi lama tidak berakhir 404.
+
+Sisa menu: `/surat-keluar`, `/ambil-nomor`, `/disposisi` (menulis & memprogres instruksi; perpindahan tahap tetap lewat Buku Kendali), `/users`, `/laporan`, `/arsip`, `/audit`, `/pengaturan`, `/bot-whatsapp`.
+
+> Halaman "Surat Masuk" versi lama sudah dihapus. Seluruh kemampuannya (tambah, edit, hapus, lampiran, filter, paginasi) sudah ada di menu v2 di atas. Ekspor CSV di Buku Kendali adalah fitur **baru** — tombol "Export Excel"/"Cetak PDF" di halaman lama tidak pernah terhubung ke fungsi apa pun.
 
 ---
 
@@ -179,13 +211,18 @@ Prasyarat: **PHP ≥ 8.1** (ekstensi `pdo_mysql`), **Node.js ≥ 18**, **MySQL/M
 ```bash
 cd api-php
 composer install                 # phpunit (dev dependency)
-vendor/bin/phpunit               # unit test: Auth, Disposition, Wabot, dst.
+vendor/bin/phpunit               # unit test: Auth, Disposition, Wabot, V2Workflow, LetterTransition, dst.
 
 # dari root proyek (backend harus jalan di :8011)
-php test_e2e.php                 # 36 asersi end-to-end alur v2 via HTTP
+php test_e2e.php                 # uji end-to-end alur v2 via HTTP
+
+# uji integrasi WA + Buku Kendali pada MySQL lokal (membuat DB terpisah
+# simars_v2_test: schema + seluruh migrasi, lalu diuji ulang dari nol)
+php api-php/tests/run_fase1_check.php
 ```
 
-Tersedia juga pemeriksa mandiri di `api-php/tests/run_*_check.php` (auth, turnstile, upload, WA bot).
+Tersedia juga pemeriksa mandiri di `api-php/tests/run_*_check.php` (auth, turnstile, upload, WA bot,
+cabang sesi WhatsApp, DM status, kompatibilitas PHP 7.4, dan `run_fase1_check.php` untuk auto-advance tahap).
 
 ## Struktur Proyek
 
@@ -196,7 +233,7 @@ Tersedia juga pemeriksa mandiri di `api-php/tests/run_*_check.php` (auth, turnst
 │   ├── config.example.php  # Contoh konfigurasi (config.php di-gitignore)
 │   ├── schema.sql          # Skema MySQL lengkap
 │   ├── migrations/         # Migrasi bertahap (v2 workflow, seed klasifikasi, dll.)
-│   ├── lib/                # Db, Auth, Upload, V2Workflow, Wabot, Whatsapp, handlers/
+│   ├── lib/                # Db, Auth, Upload, V2Workflow, LetterTransition, DispositionBridge, WaStageNotifier, Wabot, Whatsapp, handlers/
 │   └── tests/              # PHPUnit + pemeriksa mandiri
 ├── src/                    # Frontend React (halaman, komponen fitur)
 ├── components/             # Komponen UI shadcn
@@ -236,6 +273,8 @@ Panduan lengkap (persiapan hosting, import MySQL di phpMyAdmin, pengaturan PHP) 
 
 - [docs/DEPLOY.md](docs/DEPLOY.md) — checklist deploy ke hosting cPanel
 - [docs/V2_IMPLEMENTATION.md](docs/V2_IMPLEMENTATION.md) — rincian implementasi workflow v2 & hasil uji
+- [docs/CATATAN_ASUMSI_REVISI.md](docs/CATATAN_ASUMSI_REVISI.md) — asumsi & bukti verifikasi; **bagian 8** memuat penyelarasan WA + Buku Kendali (auto-advance tahap, rollback Kasubag, peran WA diperluas, urutan migrasi)
+- [docs/Plan_Alur_Disposisi_WA_Web.md](docs/Plan_Alur_Disposisi_WA_Web.md) — rencana alur disposisi WA + web; **bagian 9** status implementasinya
 - [docs/Ringkasan_SOP_04_Penanganan_Surat_Masuk.md](docs/Ringkasan_SOP_04_Penanganan_Surat_Masuk.md) — dasar SOP alur surat masuk
 - [docs/Ringkasan_Tata_Naskah_Dinas_dan_Klasifikasi_Arsip_MA.md](docs/Ringkasan_Tata_Naskah_Dinas_dan_Klasifikasi_Arsip_MA.md) — dasar hukum & kode klasifikasi
 - [docs/Panduan_Penggunaan_SIMARS.docx](docs/Panduan_Penggunaan_SIMARS.docx) — panduan pengguna akhir

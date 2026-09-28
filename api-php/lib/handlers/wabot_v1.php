@@ -8,6 +8,22 @@
 // status lewat menu sesi v2 di chat pribadi (1 = PROSES, 2 [catatan] = SELESAI),
 // dan semua pembaruan status tetap dibatasi kepemilikan disposisi (to_user_id).
 if (!Wabot::isAuthorizedRole($actor['role'])) {
+    // Fase 2 (keputusan #2 = full WA): pemegang surat di meja Kasubag/Sekretaris/
+    // Panitera BUKAN pemakai perintah teks v1, tetapi bila ia sedang memegang
+    // antrean tugas tahap, perintah "DISPOSISI"/"DISPOSISI BANTUAN" diarahkan ke
+    // menunya sendiri — bukan ditolak mentah seperti dulu.
+    $stageRow = Db::one("SELECT context FROM wa_sessions
+                         WHERE user_id = ? AND kind IN ('VERIFIKASI', 'DEKISION', 'ARCHIVE') AND expires_at > NOW()",
+        [$actor['id']]);
+    if ($stageRow) {
+        $sctx = json_decode((string) $stageRow['context'], true) ?: [];
+        $queue = array_values(array_filter((array) ($sctx['queue'] ?? []), 'is_array'));
+        if ($queue) {
+            wabotReply(Wabot::buildStageTaskMenu($queue[0], (string) $actor['name'], Wabot::pendingTaskCount($queue)),
+                $settings, $inboxId, $replyTarget);
+            return;
+        }
+    }
     wabotReply(Wabot::buildDeniedText($actor['name'], (string) $actor['role'])
         . Wabot::buildEmployeeMenuHintText(), $settings, $inboxId, $replyTarget);
     return;
@@ -86,6 +102,16 @@ if (Disposition::notifiesWhatsapp($status)) {
         'notes' => $notes,
         'actorUserId' => $actor['id'],
     ]);
+}
+
+// Fase 1: perintah teks "DISPOSISI <n> PROSES/SELESAI" juga menggerakkan TAHAP
+// SURAT di Buku Kendali (dulu hanya status disposisi yang berubah, sehingga
+// surat tampak macet di DITERUSKAN_KE_PELAKSANA). Kegagalan perpindahan tahap
+// tidak boleh menggagalkan laporan yang sudah tersimpan.
+try {
+    DispositionBridge::applyStatus((string) $disp['id'], $status, $actor);
+} catch (Throwable $e) {
+    error_log('[Wabot] gagal memajukan tahap surat: ' . $e->getMessage());
 }
 
 // Tugas selesai lewat perintah lama: sesi status pegawai utk disposisi ini

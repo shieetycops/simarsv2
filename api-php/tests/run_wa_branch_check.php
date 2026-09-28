@@ -47,6 +47,15 @@ $GLOBALS['wa_root'] = $root;
 // ---------------------------------------------------------------- child ----
 require_once $root . '/lib/Wabot.php';
 require_once $root . '/lib/Disposition.php';
+// Fase 0-3 (WA + Buku Kendali): Wabot memakai V2Workflow untuk label tahap &
+// pilihan rute; wabot_v2.php memakai WaStageNotifier (jenis sesi aksi tahap)
+// serta LetterTransition + DispositionBridge saat surat/status benar-benar
+// berpindah. Kelas-kelas ini dimuat nyata (bukan di-stub) supaya harness ikut
+// menangkap perubahan kontraknya.
+require_once $root . '/lib/V2Workflow.php';
+require_once $root . '/lib/WaStageNotifier.php';
+require_once $root . '/lib/LetterTransition.php';
+require_once $root . '/lib/DispositionBridge.php';
 // Harness TIDAK memuat lib/helpers.php: berkas itu mendeklarasikan logActivity()
 // dan letterViewUrl() yang di sini di-stub agar efeknya bisa diperiksa. Helper
 // yang tetap dibutuhkan wabot.php (maskPhone) di-stub di bawah ini.
@@ -58,6 +67,24 @@ function maskPhone(?string $phone): string
         return str_repeat('*', strlen($p));
     }
     return substr($p, 0, 4) . str_repeat('*', strlen($p) - 8) . substr($p, -4);
+}
+
+// Fase 3: kandidat menu "buat disposisi". harness ini TIDAK memuat helpers.php,
+// jadi fungsi yang di sana didefinisikan harus disediakan sendiri — SELECT-nya
+// sengaja ditulis sama supaya fixture SQL milik harness tetap cocok.
+function waDispositionCandidates(string $actorId, string $actorRole, int $limit): array
+{
+    $limit = max(1, $limit);
+    if (!in_array($actorRole, ['ADMIN', 'PIMPINAN'], true)) {
+        return Db::all("SELECT id, name, role FROM users
+                        WHERE is_active = 1 AND supervisor_id = ? AND id <> ?
+                          AND wa_number IS NOT NULL AND wa_number <> ''
+                        ORDER BY name ASC LIMIT " . ($limit + 1), [$actorId, $actorId]);
+    }
+    return Db::all("SELECT id, name, role FROM users
+                    WHERE is_active = 1 AND id <> ?
+                      AND wa_number IS NOT NULL AND wa_number <> ''
+                    ORDER BY name ASC LIMIT " . ($limit + 1), [$actorId]);
 }
 
 
@@ -693,6 +720,21 @@ function wa_cases_start(): array
     ])];
     $ready = fn() => $fix(array_merge($letter, $staff));
 
+    // Fase 2: tugas sesi aksi tahap (menu bernomor untuk Kasubag/Sekretaris/
+    // Panitera). $butuhRute=true -> pilihan masuk DIDISPOSISIKAN yang wajib
+    // menyertakan rute keputusan (KEBIJAKAN/LANGSUNG).
+    $stageTask = function (bool $butuhRute = false): array {
+        return ['letterId' => 'ltr-1', 'agenda' => 'AGD/2026/012',
+            'subject' => 'Undangan Rapat Koordinasi', 'stage' => 'DITERUSKAN_KE_KASUBAG',
+            'sensitive' => false, 'addedAt' => '2026-09-24 08:00:00',
+            'options' => [['n' => 1, 'toStage' => 'DITERUSKAN_KE_PELAKSANA',
+                'label' => 'Teruskan ke pelaksana', 'requiresRoute' => $butuhRute]]];
+    };
+    $stageSes = fn(array $queue) => $fix([
+        wa_fix("from wa_sessions where user_id = ? and kind <> 'closed' and expires_at > now()",
+            [wa_session('VERIFIKASI', ['queue' => $queue])]),
+    ]);
+
     return [
         'v2-mulai-agenda' => fn() => wa_case('wabot_v2.php',
             wa_vars('PIMPINAN', 'DISPOSISI 12', null, ['action' => 'START', 'agenda' => 12], true), $ready(), [
@@ -741,6 +783,44 @@ function wa_cases_start(): array
             wa_vars('STAFF', 'DISPOSISI 12', null, ['action' => 'START', 'agenda' => 12]), $ready(), [
                 'diabaikan senyap' => ['out', 'ignored'],
                 'sesi tidak dibuat' => ['nosessins'],
+            ]),
+
+        // --- Fase 2: sesi AKSI TAHAP (Kasubag/Sekretaris/Panitera) -------------
+        // P1 (revisi kedua): balasan ANGKA sesi aksi tahap DINONAKTIFKAN secara
+        // default (angka hanya mengenai tugas terdepan antrean, tidak terikat
+        // agenda). Kontrak lama "Pilihan *9* tidak ada" diganti balasan
+        // penjelasan + arahan ke kata kunci + nomor agenda.
+        'v2-stage-pilihan-salah' => fn() => wa_case('wabot_v2.php',
+            wa_vars('KEPALA_SUB_UMUM', '9'), $stageSes([$stageTask()]), [
+                'balasan angka dinonaktifkan (P1)' => ['has', 'dinonaktifkan'],
+                'diarahkan ke kata kunci + agenda' => ['has', 'kata kunci'],
+                'antrean tidak diubah' => ['nosessins'],
+            ]),
+        'v2-stage-menu-ulang' => fn() => wa_case('wabot_v2.php',
+            wa_vars('KEPALA_SUB_UMUM', 'MENU'), $stageSes([$stageTask()]), [
+                'menu dikirim ulang' => ['has', 'TINDAK LANJUT SURAT'],
+                'menu tanpa instruksi balas-angka (P1)' => ['nothas', 'balas nomornya'],
+                'agenda surat disebut utk perintah kata kunci' => ['has', 'AGD/'],
+            ]),
+        'v2-stage-keputusan-wajib-rute' => fn() => wa_case('wabot_v2.php',
+            wa_vars('SEKRETARIS', '1'), $stageSes([$stageTask(true)]), [
+                'balasan angka dinonaktifkan (P1)' => ['has', 'dinonaktifkan'],
+                'BANTUAN disebut' => ['has', 'BANTUAN'],
+            ]),
+        'v2-stage-batal-tutup-sesi' => fn() => wa_case('wabot_v2.php',
+            wa_vars('KEPALA_SUB_UMUM', 'BATAL'), $stageSes([$stageTask()]), [
+                'sesi ditutup' => ['saw', "update wa_sessions set kind = 'closed'", 2],
+                'dijelaskan tugas tetap menunggu' => ['has', 'tetap menunggu'],
+            ]),
+        'v2-stage-antrean-kosong' => fn() => wa_case('wabot_v2.php',
+            wa_vars('KEPALA_SUB_UMUM', '1'), $stageSes([]), [
+                'dijelaskan tidak ada tugas' => ['has', 'Tidak ada tugas surat'],
+                'sesi ditutup' => ['saw', "update wa_sessions set kind = 'closed'", 2],
+            ]),
+        'v2-stage-role-lain-diabaikan' => fn() => wa_case('wabot_v2.php',
+            wa_vars('STAFF', '1'), $stageSes([$stageTask()]), [
+                'role pegawai tidak memakai menu tahap' => ['out', 'ignored'],
+                'sesi ditutup' => ['saw', "update wa_sessions set kind = 'closed'", 2],
             ]),
     ];
 }

@@ -29,6 +29,7 @@ bekap/
 # Log & file runtime
 *.log
 *.err
+api-php/.phpunit.result.cache
 
 # OS / editor / tool lokal
 .DS_Store

@@ -56,6 +56,10 @@ if ($method === 'POST' && $id === '') {
             "Disposisi berhasil diteruskan kepada {$toUser['name']}: " . substr($b['instruction'], 0, 40) . '...');
 
         $letter = Db::one("SELECT subject, id FROM incoming_letters WHERE id = ?", [$b['incomingLetterId']]);
+        // Fase 0/1: catat PELAKSANA surat supaya Buku Kendali bisa menampilkan
+        // kolom Pelaksana dan notifikasi WA per tahap tahu siapa yang harus
+        // dihubungi ketika surat berada di rantai pelaksanaan.
+        DispositionBridge::assignLetter((string) $b['incomingLetterId'], (string) $b['toUserId']);
         $attachmentUrl = $letter ? letterViewUrl($letter['id']) : '';
         Whatsapp::notifyNewDisposition(Db::$pdo, [
             'fromName' => $fromUser['name'],
@@ -152,11 +156,28 @@ if ($method === 'PATCH' && $id !== '' && $sub === 'status') {
             ]);
         }
 
+        // Fase 1: laporan status dari web juga MENGGERAKKAN TAHAP SURAT di Buku
+        // Kendali (PROSES -> DALAM_TINDAK_LANJUT, SELESAI -> SELESAI_DITINDAKLANJUTI).
+        // Sebelum ini status disposisi berubah tetapi tahap surat tidak, sehingga
+        // Buku Kendali selalu menampilkan surat macet di DITERUSKAN_KE_PELAKSANA.
+        // Kegagalan perpindahan tahap tidak menggagalkan laporan yang tersimpan.
+        $stageAdvance = ['applied' => false, 'reason' => '', 'message' => '', 'stage' => null, 'path' => []];
+        try {
+            $stageAdvance = DispositionBridge::applyStatus($id, (string) $status, $user);
+        } catch (Throwable $e) {
+            error_log('[Disposition] gagal memajukan tahap surat: ' . $e->getMessage());
+            $stageAdvance['reason'] = 'GALAT';
+            $stageAdvance['message'] = 'Tahap surat tidak dapat dimajukan otomatis.';
+        }
+
         // Bentuk response = disposition + include (incomingLetter{subject}, fromUser, toUser).
         $disp['incomingLetter'] = ['subject' => $disp['letterSubject']];
         $disp['fromUser'] = ['id' => $disp['fromUserId'], 'name' => $disp['fromName'], 'waNumber' => $disp['fromWa']];
         $disp['toUser']   = ['id' => $disp['toUserId'], 'name' => $disp['toName']];
         unset($disp['letterSubject'], $disp['fromName'], $disp['fromWa'], $disp['toName']);
+        // Hasil auto-advance tahap ikut dikirim supaya UI bisa menampilkan
+        // "tahap surat ikut maju" beserta alasannya, bukan menebak sendiri.
+        $disp['stageAdvance'] = $stageAdvance;
         echo json_encode($disp);
     } catch (Throwable $e) {
         http_response_code(500);

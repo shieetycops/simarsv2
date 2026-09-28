@@ -100,7 +100,7 @@ final class AuthTest extends TestCase
             $this->fail("Harus 401 untuk header: '$header'");
         } catch (AuthException $e) {
             $this->assertSame(401, $e->status);
-            $this->assertSame("Sesi anda telah berakhir, silahkan login kembali.", $e->getMessage());
+            $this->assertSame("Sesi Anda telah berakhir, silakan login kembali.", $e->getMessage());
         }
     }
 }

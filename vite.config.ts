@@ -37,7 +37,10 @@ export default defineConfig({
     // v2 pakai backend sendiri di 8011 agar tidak bertabrakan dengan backend
     // versi lama (root) yang memakai 8000. Jalankan:
     //   php -S 127.0.0.1:8011 -t api-php api-php/router_dev.php
-    proxy: { '/api': 'http://127.0.0.1:8011' },
+    // '/uploads' ikut diproksikan karena lampiran disimpan di uploads/ root repo;
+    // di produksi folder itu satu document root dengan dist/, sedangkan di
+    // pengembangan disajikan api-php/router_dev.php.
+    proxy: { '/api': 'http://127.0.0.1:8011', '/uploads': 'http://127.0.0.1:8011' },
     fs: {
       // node_modules v2 adalah junction ke D:\simars\node_modules, jadi file
       // font @fontsource resolve ke path di luar folder v2. Izinkan folder

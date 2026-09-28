@@ -352,7 +352,7 @@ export default function Dispositions() {
             Riwayat
           </Button>
           <Button
-            onClick={() => navigate("/surat-masuk")}
+            onClick={() => navigate("/v2/surat-masuk")}
             className="h-9 text-sm font-medium rounded-md"
           >
             <ClipboardList className="w-4 h-4 mr-2" />
@@ -486,7 +486,7 @@ export default function Dispositions() {
                       <p className="text-sm text-slate-700 leading-relaxed">
                         &ldquo;
                         {disp.instruction ||
-                          "Silahkan laksanakan tindak lanjut sesuai dengan peraturan perundang-undangan yang berlaku dan laporkan hasilnya segera."}
+                          "Silakan laksanakan tindak lanjut sesuai dengan peraturan perundang-undangan yang berlaku dan laporkan hasilnya segera."}
                         &rdquo;
                       </p>
                       {disp.notes && (

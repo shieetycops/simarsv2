@@ -105,7 +105,7 @@ class Auth
         $parts = explode(' ', trim($authHeader));
         $token = (count($parts) === 2 && strtolower($parts[0]) === 'bearer') ? $parts[1] : '';
 
-        $expired = new AuthException(401, "Sesi anda telah berakhir, silahkan login kembali.");
+        $expired = new AuthException(401, "Sesi Anda telah berakhir, silakan login kembali.");
         if ($token === '') {
             throw $expired;
         }

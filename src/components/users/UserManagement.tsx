@@ -5,6 +5,12 @@ import { toast } from "sonner";
 
 // Ambil pesan error dari API (mis. "Password minimal 8 karakter.") supaya
 // pengguna tahu penyebabnya, bukan hanya "Gagal menyimpan data".
+// Penanda pilihan "tanpa atasan langsung" pada dropdown Atasan Langsung: Radix
+// Select menolak value string kosong, sedangkan server menerima null untuk
+// melepas hierarki (users.supervisor_id = NULL).
+const NO_SUPERVISOR = "NO_SUPERVISOR";
+
+
 const apiErrorMessage = async (res: Response, fallback: string): Promise<string> => {
   const data = (await res.json().catch(() => null)) as { message?: string } | null;
   return data?.message || fallback;
@@ -105,6 +111,13 @@ export default function UserManagement() {
   const [editRole, setEditRole] = useState("");
   const [addWaNumber, setAddWaNumber] = useState("");
   const [editWaNumber, setEditWaNumber] = useState("");
+  // Fase 3: atasan langsung (users.supervisor_id) — dasar wewenang disposisi
+  // hierarkis di server (Disposition::canDispose) dan sasaran menu WhatsApp untuk
+  // Kasubag/Sekretaris/Panitera. Sebelum ini kolomnya tidak bisa diisi dari UI.
+  // Radix Select tidak menerima value string kosong, jadi "melepas hierarki"
+  // diwakili penanda NO_SUPERVISOR lalu dikirim sebagai null.
+  const [addSupervisorId, setAddSupervisorId] = useState("");
+  const [editSupervisorId, setEditSupervisorId] = useState("");
 
   // Reset password form
   const [newPassword, setNewPassword] = useState("");
@@ -145,6 +158,9 @@ export default function UserManagement() {
           name: addName,
           role: addRole,
           waNumber: addWaNumber,
+          // Fase 3: atasan langsung ikut dikirim saat pembuatan akun supaya
+          // hierarki disposisi bisa langsung berfungsi tanpa edit kedua.
+          supervisorId: addSupervisorId && addSupervisorId !== NO_SUPERVISOR ? addSupervisorId : null,
         }),
       });
       if (!res.ok) {
@@ -157,6 +173,7 @@ export default function UserManagement() {
       setAddPassword("");
       setAddRole("");
       setAddWaNumber("");
+      setAddSupervisorId(NO_SUPERVISOR);
       await fetchUsers();
       toast.success("Pengguna berhasil ditambahkan");
     } catch (err) {
@@ -173,7 +190,19 @@ export default function UserManagement() {
     setEditName(u.name);
     setEditRole(u.role);
     setEditWaNumber(u.waNumber || "");
+    setEditSupervisorId(u.supervisorId || NO_SUPERVISOR);
     setEditOpen(true);
+  };
+
+  // Fase 3: kandidat atasan langsung = pengguna AKTIF selain dirinya sendiri
+  // (mencegah atasan = diri sendiri, yang ditolak server juga).
+  const supervisorOptions = (excludeId?: string) =>
+    users.filter((u) => u.isActive && u.id !== excludeId);
+
+  const supervisorLabel = (id?: string | null) => {
+    if (!id) return "belum dipetakan";
+    const found = users.find((u) => u.id === id);
+    return found ? `${found.name} (${roleLabel(found.role)})` : id;
   };
 
   const handleEditUser = async (e: React.FormEvent) => {
@@ -187,7 +216,14 @@ export default function UserManagement() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ name: editName, role: editRole, waNumber: editWaNumber }),
+        body: JSON.stringify({
+          name: editName,
+          role: editRole,
+          waNumber: editWaNumber,
+          // Fase 3: "NO_SUPERVISOR" dikirim sebagai null supaya hierarki bisa
+          // DILEPAS (server menolak atasan = diri sendiri).
+          supervisorId: editSupervisorId && editSupervisorId !== NO_SUPERVISOR ? editSupervisorId : null,
+        }),
       });
       if (!res.ok) {
         toast.error(await apiErrorMessage(res, "Gagal menyimpan data"));
@@ -692,6 +728,28 @@ export default function UserManagement() {
               />
               <p className="text-xs text-slate-400">Untuk notifikasi disposisi via bot WhatsApp (opsional).</p>
             </div>
+            {/* Fase 3: atasan langsung = dasar wewenang disposisi hierarkis
+                (Disposition::canDispose) dan sasaran menu WhatsApp Kasubag/
+                Sekretaris/Panitera. Tanpa pemetaan ini, server MENOLAK disposisi
+                ke bawahan dan bot tidak punya kandidat pegawai. */}
+            <div className="space-y-1.5">
+              <Label className="text-sm font-medium text-slate-700">Atasan Langsung</Label>
+              <Select value={addSupervisorId || NO_SUPERVISOR} onValueChange={setAddSupervisorId}>
+                <SelectTrigger className="h-9 rounded-md">
+                  <SelectValue placeholder="Pilih atasan langsung" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NO_SUPERVISOR}>— Tanpa atasan langsung —</SelectItem>
+                  {supervisorOptions().map((u) => (
+                    <SelectItem key={u.id} value={u.id}>{u.name} ({roleLabel(u.role)})</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-slate-400">
+                Menentukan siapa yang boleh mendisposisi pegawai ini dan siapa saja yang muncul
+                di menu WhatsApp atasannya (opsional).
+              </p>
+            </div>
             <DialogFooter className="pt-4">
               <Button
                 type="button"
@@ -775,6 +833,25 @@ export default function UserManagement() {
                 className="h-9 rounded-md"
               />
               <p className="text-xs text-slate-400">Untuk notifikasi disposisi via bot WhatsApp (opsional).</p>
+            </div>
+            {/* Fase 3: atasan langsung. Pilihan "tanpa atasan langsung" melepas
+                hierarki (dikirim sebagai null) — server menolak atasan = diri sendiri. */}
+            <div className="space-y-1.5">
+              <Label className="text-sm font-medium text-slate-700">Atasan Langsung</Label>
+              <Select value={editSupervisorId || NO_SUPERVISOR} onValueChange={setEditSupervisorId}>
+                <SelectTrigger className="h-9 rounded-md">
+                  <SelectValue placeholder="Pilih atasan langsung" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NO_SUPERVISOR}>— Tanpa atasan langsung —</SelectItem>
+                  {supervisorOptions(selectedUser?.id).map((u) => (
+                    <SelectItem key={u.id} value={u.id}>{u.name} ({roleLabel(u.role)})</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-slate-400">
+                Saat ini: {supervisorLabel(selectedUser?.supervisorId)}.
+              </p>
             </div>
             <DialogFooter className="pt-4">
               <Button

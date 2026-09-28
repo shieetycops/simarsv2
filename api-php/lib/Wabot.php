@@ -27,6 +27,18 @@ public const EMPLOYEE_SESSION_DAYS = 7;
 // Batas daftar pegawai bernomor pada menu disposisi (DM pimpinan & StartSession).
 public const MENU_TARGET_LIMIT = 25;
 
+// ---------- Fase 2: sesi aksi tahap (Kasubag/Sekretaris/Panitera) ----------
+// Role yang boleh BERTINDAK LANGSUNG dari WhatsApp pada menu tahap (verifikasi/
+// penerusan surat, keputusan disposisi, pengarsipan). Beda dari ALLOWED_ROLES
+// (perintah teks v1 & sesi "buat disposisi") yang tetap PIMPINAN/ADMIN: mereka
+// bertindak atas surat yang MEMANG sudah ada di mejanya, bukan membuat disposisi
+// baru dari nol.
+public const STAGE_ACTOR_ROLES = ['ADMIN', 'KEPALA_SUB_UMUM', 'SEKRETARIS', 'PANITERA', 'ARSIPARIS'];
+
+// Masa berlaku sesi aksi tahap: 72 jam. Cukup untuk surat dinas biasa, tetapi
+// tidak selamanya -- rute keputusan/role bisa berubah sehingga menu jadi basi.
+public const STAGE_SESSION_HOURS = 72;
+
     private const BULAN = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
         'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
 
@@ -496,10 +508,366 @@ public static function buildNoTargetText(): string
         . 'Silakan buat disposisi melalui aplikasi web.';
 }
 
+// Fase 3: role berwewenang hierarki (Kasubag/Sekretaris/Panitera) hanya boleh
+// mendisposisi ke BAWAHAN LANGSUNG, tetapi belum ada satu pun yang dipetakan
+// kolom Atasan Langsung-nya -> jelaskan supaya admin memperbaiki data.
+public static function buildNoSubordinateTargetText(): string
+{
+    return "\xE2\x9A\xA0\xEF\xB8\x8F Belum ada bawahan langsung dengan nomor WhatsApp terdaftar untuk akun Anda.\n"
+        . "Minta Admin mengisi kolom *Atasan Langsung* pada menu Pengguna, "
+        . 'atau buat disposisi melalui aplikasi web.';
+}
+
 // Pegawai tujuan tidak tersedia saat sesi (dinonaktifkan/dihapus).
 public static function buildTargetUnavailableText(string $name): string
 {
     return "\xE2\x9A\xA0\xEF\xB8\x8F Pegawai tujuan ({$name}) tidak lagi tersedia.\n"
         . "Balas *MENU* untuk menampilkan ulang daftar, atau *BATAL*.";
 }
+
+    // ---------- Fase 2: sesi aksi tahap ----------
+
+    // Boleh bertindak dari menu tahap WA? (Kasubag/Sekretaris/Panitera/Admin)
+    public static function isStageActorRole(?string $role): bool
+    {
+        return $role !== null && in_array($role, self::STAGE_ACTOR_ROLES, true);
+    }
+
+    // Kadaluarsa sesi aksi tahap (72 jam dari pembaruan terakhir).
+    public static function newStageExpiry(): string
+    {
+        return date('Y-m-d H:i:s', time() + self::STAGE_SESSION_HOURS * 3600);
+    }
+
+    /**
+     * Pisahkan kata pertama balasan sebagai kandidat RUTE keputusan.
+     * Balasan pilihan yang wajib rute ditulis "1 KEBIJAKAN [catatan]".
+     * Return [rute|null, sisaCatatan] — rute null = tak ada kata rute di depan.
+     *
+     * SOP/AS/04 PA Pasarwajo (bukan KMA 131/2023 untuk langkah 1-18).
+     */
+    public static function parseRouteChoice(?string $notes): array
+    {
+        $t = self::cleanText($notes);
+        if ($t === '') return [null, null];
+        $parts = explode(' ', $t, 2);
+        $head = strtoupper($parts[0]);
+        if (!in_array($head, V2Workflow::DISPOSITION_ROUTES, true)) return [null, $t];
+        $rest = isset($parts[1]) ? trim($parts[1]) : '';
+        return [$head, $rest === '' ? null : $rest];
+    }
+
+    /**
+     * P4 (revisi kedua): susun ulang kode unit dari token WA. cleanText membuang
+     * '_' (penanda italic WhatsApp) sehingga KASUBAG_UMUM datang sebagai dua
+     * token terpisah. Gabung token berurutan dengan '_' sampai cocok unit sah
+     * (maks 3 token sebagai margin aman; unit terpanjang = 2 token).
+     * Return [unit|null, jumlahTokenTerpakai].
+     */
+    public static function resolveUnitFromTokens(array $tokens): array
+    {
+        $tokens = array_values(array_filter($tokens,
+            fn($x) => is_string($x) && trim($x) !== ''));
+        for ($n = 1; $n <= 3 && $n <= count($tokens); $n++) {
+            $cand = strtoupper(implode('_', array_slice($tokens, 0, $n)));
+            if (in_array($cand, V2Workflow::UNIT_TUJUAN_LIST, true)) {
+                return [$cand, $n];
+            }
+        }
+        return [null, 0];
+    }
+
+    /**
+     * P4 (revisi kedua): parsing unit tujuan EKSPLISIT pada perintah ARAHAN.
+     * Penanda = token yang diawali '#', mis. "ARAHAN AGD/1 setujui ... #KASUBAG_UMUM"
+     * (underscore dibersihkan cleanText; token kode unit digabung ulang otomatis).
+     * Menggantikan tebakan lama "kata terakhir yang mirip kode unit" yang bisa
+     * menelan/menetapkan unit secara diam-diam. Aturan:
+     *   - tepat satu penanda sah   -> unit terbaca, token dibuang dari isi arahan
+     *   - penanda typo/tak dikenal -> error UNIT_INVALID (data TIDAK diubah)
+     *   - lebih dari satu penanda  -> error UNIT_INVALID
+     *   - tanpa penanda            -> unit null; arahan tetap tersimpan,
+     *     Sekretaris wajib memilih unit saat TERUSKAN (tidak ada penerusan
+     *     diam-diam ke unit).
+     * Return [unit|null, isiArahanTanpaPenanda, error|null].
+     */
+    public static function parseArahanUnit(?string $rest): array
+    {
+        $t = self::cleanText($rest);
+        if ($t === '') return [null, '', null];
+        $tokens = preg_split('/\s+/', $t);
+        $out = [];
+        $unit = null;
+        $found = 0;
+        $i = 0;
+        $n = count($tokens);
+        while ($i < $n) {
+            $tok = (string) $tokens[$i];
+            if ($tok !== '' && $tok[0] === '#') {
+                $found++;
+                $cand = [substr($tok, 1)];
+                for ($k = 1; $k <= 2; $k++) {
+                    if ($i + $k < $n) $cand[] = (string) $tokens[$i + $k];
+                }
+                [$u, $used] = self::resolveUnitFromTokens($cand);
+                if ($u === null) {
+                    return [null, $t, 'UNIT_INVALID'];
+                }
+                $unit = $u;
+                $i += $used; // lompati token yang dipakai kode unit
+                continue;
+            }
+            $out[] = $tok;
+            $i++;
+        }
+        if ($found > 1) return [null, $t, 'UNIT_INVALID'];
+        return [$unit, trim(implode(' ', $out)), null];
+    }
+
+    /**
+     * Kata kunci WA revisi SOP/AS/04 (Fix 2): satu kata kunci = satu arti,
+     * selalu memakai nomor agenda. Perintah tanpa agenda atau agenda bukan
+     * milik pengirim DITOLAK tanpa mengubah data.
+     *
+     *   TERIMA <agenda>                  — Kasubag verifikasi terima
+     *   TOLAK <agenda> <alasan wajib>    — kembalikan untuk perbaikan
+     *   KEBIJAKAN <agenda>               — Sekretaris putuskan perlu arahan pimpinan
+     *   LANGSUNG <agenda> <unit_tujuan>  — Sekretaris putuskan langsung ke unit
+     *   ARAHAN <agenda> <isi> [unit]     — Ketua/WK beri arahan (wajib isi)
+     *   TERUSKAN <agenda>                — Sekretaris laksanakan arahan ke unit
+     *   TUNJUK <agenda> <pegawai>        — kepala unit tunjuk pegawai
+     *   PROSES <agenda> [catatan]        — pegawai mulai kerja
+     *   SELESAI <agenda> [catatan]       — pegawai selesai (tidak mengembalikan)
+     *   ARSIP <agenda>                   — Arsiparis arsipkan
+     *
+     * Return null bila bukan perintah kata kunci; selain itu
+     * ['keyword'=>string,'agenda'=>string,'rest'=>string].
+     */
+    public const WA_KEYWORDS = [
+        'TERIMA', 'TOLAK', 'KEBIJAKAN', 'LANGSUNG', 'ARAHAN',
+        'TERUSKAN', 'TUNJUK', 'PROSES', 'SELESAI', 'ARSIP',
+    ];
+
+    public static function parseKeywordCommand(?string $message): ?array
+    {
+        $t = self::cleanText($message);
+        if ($t === '') return null;
+        $parts = preg_split('/\s+/', $t, 3);
+        if (!$parts || count($parts) < 1) return null;
+        $kw = strtoupper($parts[0]);
+        if (!in_array($kw, self::WA_KEYWORDS, true)) return null;
+        $agenda = isset($parts[1]) ? trim($parts[1]) : '';
+        if ($agenda === '') return ['keyword' => $kw, 'agenda' => '', 'rest' => '', 'error' => 'AGENDA_REQUIRED'];
+        $rest = isset($parts[2]) ? trim($parts[2]) : '';
+        return ['keyword' => $kw, 'agenda' => $agenda, 'rest' => $rest, 'error' => null];
+    }
+
+    /** Teks bantuan perintah kata kunci WA (SOP/AS/04). */
+    public static function buildKeywordHelpText(): string
+    {
+        return "📋 *PERINTAH WHATSAPP — SIMARS*\n"
+            . "Selalu sertakan nomor agenda. Contoh: *PROSES AGD/2026/0001*\n\n"
+            . "• *TERIMA <agenda>* — terima & teruskan\n"
+            . "• *TOLAK <agenda> <alasan>* — kembalikan (alasan wajib)\n"
+            . "• *KEBIJAKAN <agenda>* — perlu arahan pimpinan\n"
+            . "• *LANGSUNG <agenda> <unit>* — langsung ke unit pelaksana\n"
+            . "• *ARAHAN <agenda> <isi> [#KODE_UNIT]* — arahan pimpinan (isi wajib; penanda unit opsional, mis. #KASUBAG_UMUM)\n"
+            . "• *TERUSKAN <agenda>* — laksanakan arahan ke unit\n"
+            . "• *TUNJUK <agenda> <pegawai>* — tunjuk pelaksana\n"
+            . "• *PROSES <agenda> [catatan]* — mulai dikerjakan\n"
+            . "• *SELESAI <agenda> [catatan]* — selesai (tidak mengembalikan)\n"
+            . "• *ARSIP <agenda>* — arsipkan (Arsiparis)\n\n"
+            . "Unit sah: " . implode(', ', V2Workflow::UNIT_TUJUAN_LIST) . ".\n"
+            . "Menu bernomor hanya pengingat tugas: tindak lanjut lewat perintah kata kunci + nomor agenda.";
+    }
+
+    /** Balasan error perintah kata kunci (agenda hilang/milik orang lain). */
+    public static function buildKeywordErrorText(string $code, string $agenda = ''): string
+    {
+        switch ($code) {
+            case 'AGENDA_REQUIRED':
+                return "⚠️ Perintah butuh nomor agenda. Contoh: *PROSES AGD/2026/0001*\n"
+                    . "Data tidak diubah.";
+            case 'AGENDA_NOT_FOUND':
+                return "⚠️ Agenda " . ($agenda !== '' ? "*{$agenda}*" : "(kosong)")
+                    . " tidak ditemukan. Periksa nomornya. Data tidak diubah.";
+            case 'AGENDA_NOT_YOURS':
+                return "⛔ Agenda *{$agenda}* bukan tugas Anda / bukan di tahap Anda. "
+                    . "Perintah ditolak, data tidak diubah.";
+            case 'ROLE_DENIED':
+                return "⛔ Jabatan Anda tidak berwenang untuk perintah ini. "
+                    . "Perintah ditolak, data tidak diubah.";
+            case 'TOLAK_NEEDS_REASON':
+                return "⚠️ Perintah TOLAK wajib menyertakan alasan. Contoh: *TOLAK AGD/2026/0001 alamat tidak sesuai*\n"
+                    . "Data tidak diubah.";
+            case 'ARAHAN_REQUIRED':
+                return "⚠️ Perintah ARAHAN wajib menyertakan isi arahan (min 10 karakter). Contoh: *ARAHAN AGD/2026/0001 setujui, teruskan ke KASUBAG_UMUM*\n"
+                    . "Data tidak diubah.";
+            case 'UNIT_REQUIRED':
+                return "⚠️ Perintah ini wajib menyertakan unit tujuan. Pilihan: "
+                    . implode(', ', V2Workflow::UNIT_TUJUAN_LIST) . ".\nData tidak diubah.";
+            case 'UNIT_INVALID':
+                // P4: penanda #KODE_UNIT yang salah/tidak dikenal TIDAK boleh
+                // diam-diam diterima atau dibuang — wajib ada balasan error.
+                return "⚠️ Kode unit pada penanda # tidak dikenal. Pilihan sah: "
+                    . implode(', ', V2Workflow::UNIT_TUJUAN_LIST)
+                    . ".\nContoh: *ARAHAN AGD/2026/0001 setujui dan proses #KASUBAG_UMUM*\nData tidak diubah.";
+            case 'ARAHAN_RAHSIA':
+                // K6: surat RAHASIA/SANGAT_RAHASIA — isi arahan tidak boleh
+                // masuk percakapan WA; tindak lanjut hanya lewat aplikasi web.
+                return "Surat ini berlevel RAHASIA; tindak lanjut hanya lewat aplikasi web.";
+            default:
+                return "⚠️ Perintah tidak dapat diproses. Ketik *BANTUAN* untuk daftar perintah.";
+        }
+    }
+
+    /**
+     * Pemberitahuan surat masuk ke meja pemegang tahap berikutnya.
+     * $a: name, agendaNumber, subject, toStage, actorName, letterId,
+     *     sensitive (bool), withMenu (bool), actionHint, reopened (bool).
+     *
+     * SOP/AS/04 PA Pasarwajo untuk langkah 1-18; KMA 131 BAB V hanya untuk
+     * aturan keamanan (RAHASIA/SANGAT RAHASIA perihal TIDAK dikirim ke WA).
+     */
+    public static function buildStageNoticeText(array $a): string
+    {
+        $sensitive = !empty($a['sensitive']);
+        $out = !empty($a['reopened'])
+            ? "\xE2\xA9\x99 *SURAT DITARIK KEMBALI KE MEJA ANDA*\n"
+            : "\xF0\x9F\x93\xA5 *SURAT MASUK KE MEJA ANDA*\n";
+        $out .= 'Tahap: ' . V2Workflow::stageLabel($a['toStage'] ?? null) . "\n"
+            . 'Agenda: ' . (($a['agendaNumber'] ?? '') !== '' ? (string) $a['agendaNumber'] : '-') . "\n"
+            . 'Perihal: ' . ($sensitive
+                ? '[RAHASIA — isi surat hanya dibuka di aplikasi web]'
+                : self::truncate((string) ($a['subject'] ?? '-'), 80)) . "\n";
+        if (!empty($a['actorName'])) {
+            $out .= 'Diproses oleh: ' . self::truncate((string) $a['actorName'], 60) . "\n";
+        }
+        if (!empty($a['actionHint'])) {
+            $out .= 'Catatan: ' . self::truncate((string) $a['actionHint'], 100) . "\n";
+        }
+        if (!empty($a['letterId']) && function_exists('letterViewUrl')) {
+            $out .= 'Buka surat: ' . letterViewUrl((string) $a['letterId']) . "\n";
+        }
+        $out .= !empty($a['withMenu'])
+            ? "\nMenu tindakan dikirim di pesan berikutnya — balas nomornya di chat ini."
+            : "\nTindak lanjut lewat aplikasi web SIMARS.";
+        return $out;
+    }
+
+
+    /**
+     * Menu aksi bernomor untuk tugas tahap terdepan (head of queue).
+     * $task: letterId, agenda, subject, stage, sensitive, options[{n,toStage,label,requiresRoute}]
+     * $pending = jumlah tugas LAIN yang menunggu di antrean (info, bukan pilihan).
+     */
+    public static function buildStageTaskMenu(array $task, string $name, int $pending = 0): string
+    {
+        $agenda = (($task['agenda'] ?? '') !== '' && ($task['agenda'] ?? null) !== null) ? (string) $task['agenda'] : '-';
+        $out = "\xF0\x9F\x93\x9D *TINDAK LANJUT SURAT" . ($name !== '' ? " — {$name}" : '') . "*\n"
+            . 'Surat: ' . (!empty($task['sensitive'])
+                ? "[RAHASIA] agenda {$agenda}"
+                : self::truncate((string) ($task['subject'] ?? '-'), 70) . " (agenda {$agenda})") . "\n"
+            . 'Tahap sekarang: ' . V2Workflow::stageLabel($task['stage'] ?? null) . "\n\n";
+        $needsRoute = false;
+        foreach ((array) ($task['options'] ?? []) as $o) {
+            if (!empty($o['requiresRoute'])) $needsRoute = true;
+        }
+        // P1 (revisi kedua): angka menu aksi TIDAK terikat agenda tertentu
+        // (antrean bisa memuat >1 surat; balasan angka selalu mengenai tugas
+        // TERDEPAN, bukan surat yang pengirim maksudkan). Default: balasan
+        // angka DINONAKTIFKAN — menu hanya pengingat, tindak lanjut lewat kata
+        // kunci + nomor agenda. Toggle: workflow_settings.wa_stage_number_reply.
+        if (self::stageNumberReplyEnabled()) {
+            $out .= "Pilih tindakan (balas nomornya):\n";
+            foreach ((array) ($task['options'] ?? []) as $o) {
+                $out .= '*' . (int) ($o['n'] ?? 0) . '* — ' . (string) ($o['label'] ?? '') . "\n";
+            }
+            if ($needsRoute) {
+                $out .= "\nUntuk pilihan yang meminta KEPUTUSAN, tulis rutenya sekaligus:\n"
+                    . "*1 KEBIJAKAN* (perlu arahan pimpinan) atau *1 LANGSUNG* (ke unit pelaksana).\n";
+            }
+            $out .= "\nCatatan boleh ditambahkan setelah nomor, contoh: *1 Surat untuk Subbag Kepegawaian*.\n";
+        } else {
+            $out .= "Tindakan yang tersedia:\n";
+            foreach ((array) ($task['options'] ?? []) as $o) {
+                $out .= '• ' . (string) ($o['label'] ?? '') . "\n";
+            }
+            if ($needsRoute) {
+                $out .= "\nUntuk tindakan yang memerlukan KEPUTUSAN rute, balas dengan perintah "
+                    . "*KEBIJAKAN {$agenda}* (perlu arahan pimpinan) atau *LANGSUNG {$agenda} <unit>* (ke unit pelaksana).\n";
+            }
+            $out .= "\nBalas dengan perintah kata kunci + nomor agenda surat ini (contoh: *TERIMA {$agenda}*). "
+                . "Ketik *BANTUAN* untuk daftar perintah.\n";
+        }
+        if ($pending > 0) $out .= "\n_" . $pending . " tugas lain menunggu di antrean Anda._\n";
+        $out .= '*MENU* tampilkan ulang | *BATAL* tutup sesi.';
+        return $out;
+    }
+
+    /** P1: apakah balasan angka menu tahap aktif (sumber: WorkflowConfig). */
+    public static function stageNumberReplyEnabled(): bool
+    {
+        return WorkflowConfig::waStageNumberReply();
+    }
+
+    /** P1: balasan angka menu aksi tahap ditolak (angka tidak terikat agenda). */
+    public static function buildStageNumberDisabledText(): string
+    {
+        return "⚠️ Balasan angka untuk tindakan surat dinonaktifkan: angka pada menu tidak terikat agenda tertentu "
+            . "dan berisiko salah surat saat Anda memegang lebih dari satu tugas.\n"
+            . "Gunakan perintah kata kunci + nomor agenda, contoh: *TERIMA AGD/2026/0001*. "
+            . "Ketik *BANTUAN* untuk daftar perintah, atau tindak lanjut lewat aplikasi web SIMARS.";
+    }
+
+    /** Konfirmasi setelah aksi tahap tersimpan. */
+    public static function buildStageTaskApplied(array $task, string $toStage, ?string $route, bool $hasMore, int $pending = 0): string
+    {
+        // T9/KMA 131 BAB V: perihal surat RAHASIA/SANGAT_RAHASIA tidak boleh
+        // ikut payload WA — hanya agenda yang boleh disebut.
+        $appliedAgenda = (($task['agenda'] ?? '') !== '' && ($task['agenda'] ?? null) !== null) ? (string) $task['agenda'] : '-';
+        $out = "\xE2\x9C\x85 *TINDAKAN TERSIMPAN*\n"
+            . 'Surat: ' . (!empty($task['sensitive'])
+                ? "[RAHASIA] agenda {$appliedAgenda}"
+                : self::truncate((string) ($task['subject'] ?? '-'), 70)) . "\n"
+            . 'Tahap baru: ' . V2Workflow::stageLabel($toStage);
+        if ($route !== null && $route !== '') {
+            $out .= "\nKeputusan: " . V2Workflow::routeLabel($route);
+        }
+        $out .= "\n\nPemegang tahap berikutnya sudah menerima notifikasi WhatsApp.";
+        if ($hasMore) {
+            $out .= "\n\nAda tugas berikutnya di antrean — menunya menyusul.";
+        } elseif ($pending > 0) {
+            $out .= "\n\nMasih ada *{$pending}* tugas lain di antrean Anda; balas *MENU* untuk melihatnya.";
+        } else {
+            $out .= "\nSesi aksi surat ditutup. Ketik *MENU* untuk memeriksa kembali.";
+        }
+        return $out;
+    }
+
+    /** Aksi tahap gagal (tahap/role/rute berubah sejak menu dikirim). */
+    public static function buildStageTaskFailed(string $message): string
+    {
+        return "\xE2\x9A\xA0\xEF\xB8\x8F Tindakan tidak dapat diproses.\n" . $message
+            . "\n\nBalas *MENU* untuk memuat ulang menu terbaru, atau buka aplikasi web SIMARS.";
+    }
+
+    /** Tidak ada tugas tahap tersisa untuk user ini. */
+    public static function buildNoStageTaskText(string $name): string
+    {
+        return "\xE2\x9C\x85 Tidak ada tugas surat yang menunggu tindakan Anda"
+            . ($name !== '' ? ", {$name}" : '') . ".\n"
+            . 'Ketika surat masuk ke meja Anda, notifikasi + menu dikirim otomatis.';
+    }
+
+    /** Jumlah tugas LAIN di antrean (head = tugas yang menunya sedang tampil). */
+    public static function pendingTaskCount(array $queue): int
+    {
+        return max(0, count($queue) - 1);
+    }
+
 }
+
+// Dependensi konfigurasi P1 (angka menu) — di-require_once supaya file ini
+// juga aman dipakai runner uji yang memuat lib satu per satu.
+require_once __DIR__ . '/WorkflowConfig.php';

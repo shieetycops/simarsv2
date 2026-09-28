@@ -8,11 +8,23 @@ require_once __DIR__ . '/../lib/helpers.php';
 require_once __DIR__ . '/../lib/Disposition.php';
 require_once __DIR__ . '/../lib/Wabot.php';
 require_once __DIR__ . '/../lib/Whatsapp.php';
+require_once __DIR__ . '/WaStub.php';
 
 final class DispositionTest extends TestCase
 {
+    use WaStub;
+
     /** Setiap Whatsapp::$sender dipanggil dicatat di sini. */
     private array $sends = [];
+
+    /**
+     * Stub Fonnte dipasang ulang sebelum setiap uji: properti statis bisa sudah
+     * dinullkan uji lain, dan uji ini TIDAK boleh menembak WA sungguhan.
+     */
+    protected function setUp(): void
+    {
+        $this->stubWhatsapp();
+    }
 
     /** Aturan hierarki: siapa boleh disposisi ke siapa. */
     public function testHierarchyTable(): void
@@ -90,7 +102,7 @@ final class DispositionTest extends TestCase
             'deadline' => null,
             'actorUserId' => 'actor1',
         ]);
-        Whatsapp::$sender = null;
+        $this->stubWhatsapp();
 
         $this->assertCount(1, $this->sends, 'disposisi baru: hanya pengumuman grup');
         $captured = $this->sends[0];
@@ -118,7 +130,7 @@ final class DispositionTest extends TestCase
             'notes' => 'beres',
             'actorUserId' => 'actor2',
         ]);
-        Whatsapp::$sender = null;
+        $this->stubWhatsapp();
 
         // leadNoNum (tanpa nomor) + leadOff (nonaktif) tersaring query; grup terakhir.
         $targets = array_column($this->sends, 'target');
@@ -147,7 +159,7 @@ final class DispositionTest extends TestCase
             'notes' => null,
             'actorUserId' => 'lead1',
         ]);
-        Whatsapp::$sender = null;
+        $this->stubWhatsapp();
 
         $targets = array_column($this->sends, 'target');
         $this->assertSame(['628222', 'GRP'], $targets);
@@ -164,7 +176,7 @@ final class DispositionTest extends TestCase
         Whatsapp::notifyDispositionStatus(Db::$pdo, [
             'fromName' => 'Budi', 'workerName' => 'Siti', 'subject' => 'x', 'status' => 'SELESAI', 'notes' => null, 'actorUserId' => 'actor3',
         ]);
-        Whatsapp::$sender = null;
+        $this->stubWhatsapp();
         $this->assertSame([], $this->sends, 'notifikasi nonaktif tak boleh kirim');
         $logs = Db::all("SELECT * FROM activity_logs WHERE action = 'WHATSAPP_SENT' AND user_id = 'actor3'");
         $this->assertCount(0, $logs);
